@@ -63,6 +63,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private const string InterruptButtonId = "activity-interrupt";
     private const string WaitButtonId = "activity-wait";
 
+    // Every RegisterCommandAsync'd command is a subcommand of this one — see
+    // IOperatorChannel.RegisterCommandAsync — so the name itself reads as
+    // operator-only in Discord's UI, not just enforced silently.
+    private const string AdminCommandName = "admin";
+
     private static readonly Regex FenceDelimiter =
         new(@"^```(\S*)[ \t]*$", RegexOptions.Multiline | RegexOptions.Compiled);
 
@@ -92,6 +97,14 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     // reconnect), written by SetAwayAsync — a gateway drop-and-resume during
     // quiet hours must not silently flip the bot back to looking awake.
     private volatile bool _away;
+
+    // Filled by RegisterCommandAsync (before StartAsync), registered with
+    // Discord as subcommands of a single global "admin" command once login
+    // succeeds — see StartAsync and AdminCommandName. Operator-only.
+    private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _adminCommands = new();
+    // Filled by RegisterWhitelistedCommandAsync — each its own standalone
+    // top-level global command, not grouped under "admin". Operator + whitelist.
+    private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _userCommands = new();
 
     public event Func<ulong, string, string, Task>? MessageReceived;
 
@@ -125,8 +138,19 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         _client.Log += OnLog;
         _client.MessageReceived += OnGatewayMessageAsync;
         _client.ButtonExecuted += OnButtonExecutedAsync;
+        _client.SlashCommandExecuted += OnSlashCommandExecutedAsync;
         _client.Ready += OnReadyRestorePresence;
         _activity.Changed += OnActivityChanged;
+    }
+
+    public Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+        _adminCommands[name] = (description, handler);
+        return Task.CompletedTask;
+    }
+
+    public Task RegisterWhitelistedCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+        _userCommands[name] = (description, handler);
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -199,6 +223,43 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
             ?? throw new InvalidOperationException(
                 $"Discord user {_operatorUserId} not found — check OperatorUserId is correct.");
         _dmChannel = await user.CreateDMChannelAsync();
+
+        // Global, not guild: DM-only means guild-scoped commands would never
+        // be reachable at all. A first-time registration (or any change to
+        // name/description) can take up to ~1h to propagate through
+        // Discord's own cache — re-registering an unchanged set is
+        // effectively a no-op, safe to just always do on every start.
+        //
+        // Bulk overwrite, not CreateGlobalCommand per entry: this REPLACES
+        // the whole global command set in one call rather than adding to it,
+        // so a command dropped from either dictionary (or, e.g., an earlier
+        // version of this bot that registered /goals and /chores as separate
+        // top-level commands before they were grouped under /admin) doesn't
+        // linger forever — Discord has no other way to retire a global
+        // command that's no longer registered. Both tiers have to go in the
+        // SAME call for that reason — a bulk overwrite that only listed one
+        // tier would retire the other.
+        var toRegister = new List<ApplicationCommandProperties>();
+
+        if (_adminCommands.Count > 0)
+        {
+            var admin = new SlashCommandBuilder().WithName(AdminCommandName).WithDescription("Operator-only commands");
+            foreach (var (name, (description, _)) in _adminCommands)
+                admin.AddOption(new SlashCommandOptionBuilder()
+                    .WithName(name)
+                    .WithDescription(description)
+                    .WithType(ApplicationCommandOptionType.SubCommand));
+            toRegister.Add(admin.Build());
+        }
+
+        foreach (var (name, (description, _)) in _userCommands)
+            toRegister.Add(new SlashCommandBuilder().WithName(name).WithDescription(description).Build());
+
+        if (toRegister.Count > 0)
+        {
+            try { await _client.Rest.BulkOverwriteGlobalCommands([.. toRegister]); }
+            catch (Exception ex) { Console.Error.WriteLine($"[discord] failed to register commands: {ex.Message}"); }
+        }
 
         _inboxWorker = Task.Run(() => ProcessInboxAsync(ct), CancellationToken.None);
     }
@@ -375,6 +436,82 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
             }
         }
         catch (Exception ex) { Console.Error.WriteLine($"[discord] button handling failed: {ex}"); }
+    }
+
+    /// <summary>
+    /// Dispatches to whichever tier registered the command — "admin"
+    /// (operator-only, subcommands — see RegisterCommandAsync) or a
+    /// standalone top-level command (operator + whitelist — see
+    /// RegisterWhitelistedCommandAsync). Slash commands are a separate event
+    /// path from regular DMs entirely, so a whitelisted non-operator sender
+    /// (who does have an open DM channel, unlike a stranger) isn't screened
+    /// out by OnGatewayMessageAsync's whitelist check the way their messages
+    /// are — each branch below enforces its own gate regardless of what the
+    /// command's name already implies.
+    ///
+    /// Deliberately answers via command.RespondAsync directly rather than
+    /// SendAsync/ReplyToAsync: this must stay off every path that feeds
+    /// ContextBuilder (db.AddMessage, PeopleStore.AppendInteractionLog,
+    /// MessageReceived). See RegisterCommandAsync's doc — the command and its
+    /// response must never reach the model.
+    /// </summary>
+    private async Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
+    {
+        if (command.Data.Name == AdminCommandName)
+        {
+            if (command.User.Id != _operatorUserId)
+            {
+                await command.RespondAsync("This command is only available to the operator.", ephemeral: true);
+                return;
+            }
+
+            // Which /admin subcommand was actually invoked — Discord nests it
+            // as the (sole) option on the top-level "admin" interaction
+            // rather than giving it its own Data.Name.
+            var sub = command.Data.Options.FirstOrDefault()?.Name;
+            if (sub is null || !_adminCommands.TryGetValue(sub, out var adminEntry))
+            {
+                await command.RespondAsync("Unknown command.", ephemeral: true);
+                return;
+            }
+
+            await RespondFromHandlerAsync(command, $"/{AdminCommandName} {sub}", adminEntry.Handler);
+            return;
+        }
+
+        if (_userCommands.TryGetValue(command.Data.Name, out var userEntry))
+        {
+            // Same whitelist gate as an ordinary DM (see OnGatewayMessageAsync)
+            // — this is deliberately not operator-only, unlike the admin
+            // branch above. See RegisterWhitelistedCommandAsync.
+            if (command.User.Id != _operatorUserId && !_allowedUserIds.Contains(command.User.Id))
+            {
+                await command.RespondAsync("This command isn't available to you.", ephemeral: true);
+                return;
+            }
+
+            await RespondFromHandlerAsync(command, $"/{command.Data.Name}", userEntry.Handler);
+            return;
+        }
+
+        await command.RespondAsync("Unknown command.", ephemeral: true);
+    }
+
+    private static async Task RespondFromHandlerAsync(SocketSlashCommand command, string label, Func<CancellationToken, Task<string>> handler)
+    {
+        try
+        {
+            var text = await handler(default);
+            if (string.IsNullOrWhiteSpace(text)) text = "(nothing to show)";
+            if (text.Length > MaxMessageLength) text = text[..(MaxMessageLength - 20)] + "\n[...truncated]";
+            await command.RespondAsync(text, ephemeral: true);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[discord] {label} failed: {ex}");
+            try { await command.RespondAsync($"⚠️ {label} failed: {ex.Message}", ephemeral: true); }
+            catch { /* best-effort */ }
+        }
     }
 
     /// <summary>
@@ -563,6 +700,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         _client.Log -= OnLog;
         _client.MessageReceived -= OnGatewayMessageAsync;
         _client.ButtonExecuted -= OnButtonExecutedAsync;
+        _client.SlashCommandExecuted -= OnSlashCommandExecutedAsync;
         _client.Ready -= OnReadyRestorePresence;
         _activity.Changed -= OnActivityChanged;
         _inbox.Writer.TryComplete();

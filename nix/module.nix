@@ -21,6 +21,13 @@ let
   socketDir = "/run/cozy-harness";
   socketPathFor = name: "${socketDir}/llama-${name}.sock";
 
+  # Not a lib.mkOption — the pulse tick generates ~20 tokens and always runs
+  # single-slot (see the pulse mkLlamaService call below), so there has never
+  # been a reason to make this tunable. Bound once here so the ExecStart flag
+  # and the value C# is told for /admin context (settings.llm.pulseContextSize)
+  # can't drift apart.
+  pulseContextSize = 8192;
+
   # Shared with the download-progress notifier below and the Discord-config
   # assertion at the bottom of this file.
   operatorUserId = cfg.operatorDiscordUserId;
@@ -813,6 +820,21 @@ in
         thread of a conversation with normal pauses in it.
       '';
     };
+
+    contextWarningThreshold = lib.mkOption {
+      type = lib.types.float;
+      default = 0.8;
+      description = ''
+        Fraction of the reply slot's context window (mainContextSize /
+        mainSlots) that triggers a warning appended to the reply itself,
+        addressed to whoever the agent is talking to — not the operator
+        specifically, since this is about their own conversation running out
+        of room. Anyone allowed to DM the agent can also check current usage
+        directly with /context.
+
+        1.0 (or higher) never warns, since usage can't exceed capacity.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -834,6 +856,7 @@ in
       # module's own, more self-explanatory option names for the same thing.
       channel.allowedUsers = map (u: { userId = u.discordUserId; name = u.name; }) cfg.allowedUsers;
       channel.conversationGapMinutes = cfg.conversationGapMinutes;
+      channel.contextWarningThreshold = cfg.contextWarningThreshold;
       feeds.githubUser = cfg.githubUser;
       llm = {
         mainSocketPath = socketPathFor "main";
@@ -841,6 +864,13 @@ in
         topP = cfg.topP;
         topK = cfg.topK;
         stop = cfg.stopSequences;
+        # For /admin context: cfg.mainSlots already reflects the MTP-forced
+        # override below regardless of textual order (module evaluation is a
+        # fixed point, not sequential) — same value mkLlamaService's own
+        # `parallel = cfg.mainSlots;` call gets, so these can't disagree.
+        mainContextSize = cfg.mainContextSize;
+        mainSlots = cfg.mainSlots;
+        pulseContextSize = pulseContextSize;
         # MTP only supports a single parallel slot (see the mainSlots override
         # below), so every tick type has to land on the one slot that exists.
         slots =
@@ -891,7 +921,7 @@ in
       (mkLlamaService {
         name = "pulse";
         model = "${cfg.modelDirectory}/${cfg.pulseModel}";
-        ctxSize = 8192;
+        ctxSize = pulseContextSize;
         parallel = 1;
         quantKv = false;
         memoryMin = cfg.limits.pulseModelReserve;

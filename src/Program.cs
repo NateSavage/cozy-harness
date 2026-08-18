@@ -112,6 +112,54 @@ channel.MessageReceived += async (userId, discordName, content) => {
     db.AddMessage("in", ResolveContactName(userId, discordName), content, userId.ToString());
     await scheduler.HandleInboundAsync(userId, cts.Token);
 };
+
+await channel.RegisterCommandAsync("goals", "List active goals", ct => {
+    var goals = db.ActiveGoals();
+    var text = goals.Count == 0
+        ? "No active goals."
+        : string.Join("\n", goals.Select(g =>
+            $"**{g.Title}** ({g.Kind}, `{g.Id}`) — last touched " +
+            (g.LastTouched is { } lt && DateTimeOffset.TryParse(lt, out var d) ? ContextBuilder.Ago(d) : "never")));
+    return Task.FromResult(text);
+});
+
+// Whitelisted, not admin: anyone allowed to DM the agent at all is allowed
+// to check this — see IOperatorChannel.RegisterWhitelistedCommandAsync.
+await channel.RegisterWhitelistedCommandAsync("context", "Show context window usage per tick type", ct => {
+    // Grouped by (server, slot) rather than one line per tick type: several
+    // tick types deliberately share a slot (see LlmConfig.Slots — chore
+    // shares main's slot 0 with work always, and under MTP everything but
+    // pulse shares slot 0) and would otherwise print the same number twice
+    // with no indication they're not independent.
+    var mainCapacity = cfg.Llm.MainContextSize / Math.Max(1, cfg.Llm.MainSlots);
+    var groups = cfg.Llm.Slots
+        .GroupBy(kv => (IsPulse: kv.Key == "pulse", kv.Value))
+        .OrderBy(g => g.Key.IsPulse).ThenBy(g => g.Key.Value);
+
+    var lines = groups.Select(g => {
+        var (isPulse, slot) = g.Key;
+        var names = string.Join(", ", g.Select(kv => kv.Key).OrderBy(n => n));
+        var client = isPulse ? pulseLlm : mainLlm;
+        var capacity = isPulse ? cfg.Llm.PulseContextSize : mainCapacity;
+        var server = isPulse ? "pulse" : "main";
+        var used = client.LastKnownUsage(slot);
+        return used is null
+            ? $"**{names}** (slot {slot}, {server}) — no completions yet this run"
+            : $"**{names}** (slot {slot}, {server}) — {used}/{capacity} tokens ({used * 100 / capacity}%)";
+    });
+    return Task.FromResult(string.Join("\n", lines));
+});
+
+await channel.RegisterCommandAsync("chores", "List active chores", ct => {
+    var chores = db.ActiveChores();
+    var text = chores.Count == 0
+        ? "No active chores."
+        : string.Join("\n", chores.Select(c =>
+            $"**{c.Title}** (`{c.Id}`) — due " +
+            (DateTimeOffset.TryParse(c.DueBy, out var d) ? ContextBuilder.Ago(d) : c.DueBy)));
+    return Task.FromResult(text);
+});
+
 await channel.StartAsync(cts.Token);
 
 Console.WriteLine($"[harness] running. tree={cfg.TreeRoot} tz={cfg.OperatorTimeZone}");

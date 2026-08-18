@@ -31,6 +31,13 @@ public sealed class LlmConfig {
     public string MainSocketPath { get; set; } = "/run/cozy-harness/llama-main.sock";
     public string PulseSocketPath { get; set; } = "/run/cozy-harness/llama-pulse.sock";
 
+    /// <summary>Total context on the main server, across all of MainSlots — see /admin context.</summary>
+    public int MainContextSize { get; set; } = 65536;
+    /// <summary>Parallel slots on the main server; each gets MainContextSize / MainSlots. Forced to 1 when MTP is on — see module.nix's enableMtp.</summary>
+    public int MainSlots { get; set; } = 4;
+    /// <summary>Total context on the pulse server, which always runs single-slot — the pulse tick's own capacity, unlike the main server's, needs no division.</summary>
+    public int PulseContextSize { get; set; } = 8192;
+
     /// <summary>
     /// One slot per tick type. Each slot keeps its KV cache warm between ticks,
     /// so only the delta is prefilled. See design doc section 7.
@@ -115,6 +122,14 @@ public sealed class ChannelConfig {
     /// ReplyTick's context reaches — see IndexDb.RecentConversation.
     /// </summary>
     public int ConversationGapMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Fraction of the reply slot's context window (LlmConfig.MainContextSize
+    /// / MainSlots) that triggers an in-band warning appended to the reply —
+    /// see ReplyTick. 1.0 (or higher) never warns, since usage can't exceed
+    /// capacity. Exposed as services.cozy-harness.contextWarningThreshold.
+    /// </summary>
+    public double ContextWarningThreshold { get; set; } = 0.8;
 
     /// <summary>
     /// The display label for whoever userId actually is: the operator's own

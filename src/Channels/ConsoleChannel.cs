@@ -24,6 +24,33 @@ public sealed class ConsoleChannel : IOperatorChannel {
     private const ulong ConsoleUserId = 0;
     private const string ConsoleUserName = "console";
 
+    // Console's equivalent of Discord's registered slash commands — same
+    // handlers, just typed as "/admin name" (RegisterCommandAsync) or a bare
+    // "/name" (RegisterWhitelistedCommandAsync), matching Discord's
+    // grouped-vs-standalone split (see DiscordChannel.AdminCommandName). No
+    // operator/whitelist gate needed here: there's only ever one person on
+    // the other end of a console — the split exists purely so typing one
+    // matches the other channel's spelling.
+    //
+    // Dispatched straight to Console.WriteLine below, before MessageReceived
+    // is ever invoked for that line — see RegisterCommandAsync's doc on
+    // IOperatorChannel. The command text and its response must never become
+    // something db.AddMessage/AppendInteractionLog records, or ContextBuilder
+    // will hand it to the model as if it were something typed to the agent.
+    private const string AdminPrefix = "/admin ";
+    private readonly Dictionary<string, Func<CancellationToken, Task<string>>> _adminCommands = new();
+    private readonly Dictionary<string, Func<CancellationToken, Task<string>>> _userCommands = new();
+
+    public Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+        _adminCommands[name] = handler;
+        return Task.CompletedTask;
+    }
+
+    public Task RegisterWhitelistedCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+        _userCommands[name] = handler;
+        return Task.CompletedTask;
+    }
+
     public Task StartAsync(CancellationToken ct) {
         _ = Task.Run(async () =>
         {
@@ -36,6 +63,27 @@ public sealed class ConsoleChannel : IOperatorChannel {
                     Console.WriteLine(_activity.TryInterrupt()
                         ? "[interrupt] cancelling the current tick."
                         : "[interrupt] nothing running to interrupt.");
+                    continue;
+                }
+
+                if (line.Trim().StartsWith(AdminPrefix, StringComparison.Ordinal)) {
+                    var name = line.Trim()[AdminPrefix.Length..].Trim();
+                    if (_adminCommands.TryGetValue(name, out var handler)) {
+                        try { Console.WriteLine($"\n{await handler(ct)}\n"); }
+                        catch (Exception ex) { await NotifyErrorAsync($"{AdminPrefix}{name} failed", ex, ct); }
+                    } else {
+                        Console.WriteLine($"[admin] unknown command: {name}");
+                    }
+                    continue;
+                }
+
+                // Bare "/name" — RegisterWhitelistedCommandAsync's standalone
+                // top-level commands, matched only against that dictionary so
+                // this can never accidentally reach an admin-only handler.
+                if (line.Trim().StartsWith('/') && _userCommands.TryGetValue(line.Trim()[1..], out var userHandler)) {
+                    var name = line.Trim()[1..];
+                    try { Console.WriteLine($"\n{await userHandler(ct)}\n"); }
+                    catch (Exception ex) { await NotifyErrorAsync($"/{name} failed", ex, ct); }
                     continue;
                 }
 

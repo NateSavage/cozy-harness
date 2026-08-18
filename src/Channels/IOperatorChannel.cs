@@ -18,6 +18,49 @@ public interface IOperatorChannel {
     Task SendAsync(string content, CancellationToken ct);
 
     /// <summary>
+    /// Registers a named command (a Discord slash command; a `/admin name`
+    /// line in ConsoleChannel) whose handler returns the text to show back.
+    /// Call once per command, before StartAsync, from Program.cs — the
+    /// channel stays domain-agnostic; whoever registers supplies the actual
+    /// lookup (querying IndexDb, etc.). Operator-only, unconditionally: this
+    /// is a control-plane surface like the interrupt buttons, not something
+    /// extended to the whitelist — see RegisterWhitelistedCommandAsync for
+    /// that.
+    ///
+    /// Every command registered here is grouped under a single "admin"
+    /// command — `/admin goals`, `/admin chores`, etc. in Discord — so the
+    /// name itself signals operator-only rather than that only being
+    /// discoverable from a permission error after the fact. `name` is the
+    /// subcommand, not the top-level command.
+    ///
+    /// Hard requirement, not an incidental property, and shared with
+    /// RegisterWhitelistedCommandAsync below: a command invocation and its
+    /// handler's response must never reach the model's context. Neither side
+    /// goes through MessageReceived, db.AddMessage, or
+    /// PeopleStore.AppendInteractionLog — implementations must answer the
+    /// command directly (Discord: an ephemeral interaction response; Console:
+    /// a direct Console.WriteLine) and never route it through SendAsync/
+    /// ReplyToAsync or any other path ContextBuilder later reads from. If a
+    /// future command's handler needs to write something durable, it must not
+    /// be anything RecentConversation/ContextBuilder pulls in as if it were
+    /// something the agent said or was told.
+    /// </summary>
+    Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler);
+
+    /// <summary>
+    /// Same contract as RegisterCommandAsync — including the hard
+    /// context-isolation requirement documented there — except the audience
+    /// is the operator OR anyone on ChannelConfig.AllowedUsers, not the
+    /// operator alone. Registered as its own standalone top-level command
+    /// (`/context`, typed the same in ConsoleChannel), deliberately NOT
+    /// grouped under "admin": that name means operator-only, and this isn't.
+    /// Reserve this for things that are safe to hand to anyone allowed to DM
+    /// the agent at all — operational counters like /context, not anything
+    /// that touches goals, chores, or other people's conversations.
+    /// </summary>
+    Task RegisterWhitelistedCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler);
+
+    /// <summary>
     /// A reply addressed to whoever actually sent the inbound message —
     /// operator or a whitelisted third party. Routes to that sender's own DM
     /// channel, not necessarily the operator's (see DiscordChannel's

@@ -87,6 +87,21 @@ public sealed class ReplyTick : ITick {
                 """),
             _cfg.Slots["reply"], _cfg.MaxTokensReply, ct);
 
+        // Real usage from the completion that just happened, not an estimate
+        // — see LlamaClient._slotUsage. Checked here, before anything below
+        // reads r.Reply, so the warning (if any) rides along in the same
+        // message rather than as a separate, easy-to-miss follow-up, and so
+        // what gets logged/recorded matches what was actually sent.
+        if (r?.Reply is { Length: > 0 }) {
+            var slot = _cfg.Slots["reply"];
+            var used = _llm.LastKnownUsage(slot);
+            var capacity = _cfg.MainContextSize / Math.Max(1, _cfg.MainSlots);
+            if (used is not null && capacity > 0 && (double)used.Value / capacity >= _channelCfg.ContextWarningThreshold) {
+                var pct = (int)(100.0 * used.Value / capacity);
+                r.Reply += $"\n\n⚠️ *(heads up — this conversation is at {pct}% of what I can hold in context at once; the oldest parts may start dropping out of view soon.)*";
+            }
+        }
+
         if (r?.Reply is null || string.IsNullOrWhiteSpace(r.Reply)) {
             // Silence here is worse than the tick just failing: whoever's
             // waiting watched the typing indicator run and then nothing

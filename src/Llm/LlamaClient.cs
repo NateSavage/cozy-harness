@@ -22,6 +22,17 @@ public sealed class LlamaClient : IDisposable {
     private readonly int _topK;
     private readonly IReadOnlyList<string> _stop;
 
+    // Per slot: tokens_evaluated + tokens_predicted from that slot's most
+    // recent completion — see CompleteAsync. tokens_evaluated is llama-server's
+    // own count of the FULL prompt it was asked to evaluate (cache_prompt just
+    // means some of that count was reused rather than recomputed, per
+    // tokens_cached; it doesn't shrink tokens_evaluated itself), so this is a
+    // real total for what that slot's KV cache holds after the call, not
+    // ContextBuilder.Estimate's char/4 guess. Absent until a slot's first
+    // completion since process start — a cold KV cache, correctly distinct
+    // from "0 tokens used".
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, int> _slotUsage = new();
+
     /// <param name="socketPath">
     /// Filesystem path to the llama-server's unix socket (its `--host *.sock`
     /// flag). The request URI's host is never actually dialed — every connection
@@ -92,8 +103,13 @@ public sealed class LlamaClient : IDisposable {
         var json = await resp.Content.ReadFromJsonAsync<CompletionResponse>(cancellationToken: ct)
                    ?? throw new InvalidOperationException("empty completion response");
 
-        return new LlmResult(json.Content ?? "", json.TokensEvaluated + json.TokensPredicted);
+        var tokens = json.TokensEvaluated + json.TokensPredicted;
+        _slotUsage[slot] = tokens;
+        return new LlmResult(json.Content ?? "", tokens);
     }
+
+    /// <summary>Real token count in this slot's KV cache as of its most recent completion — see _slotUsage. Null if nothing has completed on this slot since the process started.</summary>
+    public int? LastKnownUsage(int slot) => _slotUsage.TryGetValue(slot, out var t) ? t : null;
 
     /// <summary>
     /// Ask for JSON and parse it. Small models fence their output constantly, so

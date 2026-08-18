@@ -343,6 +343,16 @@ public sealed class IndexDb : IDisposable
         return list;
     }
 
+    public List<(string Id, string Title, string DueBy)> ActiveChores()
+    {
+        var list = new List<(string, string, string)>();
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT id, title, due_by FROM chores WHERE state='active' ORDER BY due_by ASC";
+        using var r = c.ExecuteReader();
+        while (r.Read()) list.Add((r.GetString(0), r.GetString(1), r.GetString(2)));
+        return list;
+    }
+
     public int CountGoals(string state, string? kind = null)
     {
         using var c = _db.CreateCommand();
