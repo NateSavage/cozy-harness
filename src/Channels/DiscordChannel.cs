@@ -264,11 +264,25 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         // command that's no longer registered. Both tiers have to go in the
         // SAME call for that reason — a bulk overwrite that only listed one
         // tier would retire the other.
+        // Discord's docs don't actually pin down what `contexts` defaults to
+        // when left unset — and this bot has no guild presence commands could
+        // fall back on, so an ambiguous default is exactly the gap that would
+        // make every command silently invisible in the one place (BotDm) it's
+        // ever used, with nothing in our own logs to show for it (the API call
+        // still succeeds; Discord just never offers the command to anyone).
+        // Setting both explicitly removes the ambiguity rather than trusting it.
+        var dmContexts = new[] { InteractionContextType.Guild, InteractionContextType.BotDm };
+        var guildInstall = new[] { ApplicationIntegrationType.GuildInstall };
+
         var toRegister = new List<ApplicationCommandProperties>();
 
         if (_adminCommands.Count > 0)
         {
-            var admin = new SlashCommandBuilder().WithName(AdminCommandName).WithDescription("Operator-only commands");
+            var admin = new SlashCommandBuilder()
+                .WithName(AdminCommandName)
+                .WithDescription("Operator-only commands")
+                .WithContextTypes(dmContexts)
+                .WithIntegrationTypes(guildInstall);
             foreach (var (name, (description, _)) in _adminCommands)
                 admin.AddOption(new SlashCommandOptionBuilder()
                     .WithName(name)
@@ -278,12 +292,25 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         }
 
         foreach (var (name, (description, _)) in _userCommands)
-            toRegister.Add(new SlashCommandBuilder().WithName(name).WithDescription(description).Build());
+            toRegister.Add(new SlashCommandBuilder()
+                .WithName(name)
+                .WithDescription(description)
+                .WithContextTypes(dmContexts)
+                .WithIntegrationTypes(guildInstall)
+                .Build());
 
         if (toRegister.Count > 0)
         {
             try { await _client.Rest.BulkOverwriteGlobalCommands([.. toRegister]); }
-            catch (Exception ex) { Console.Error.WriteLine($"[discord] failed to register commands: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[discord] failed to register commands: {ex.Message}");
+                // A stderr line nobody's watching is exactly how this failure
+                // mode goes unnoticed — the DM channel is already resolved by
+                // this point, so send it where it'll actually be seen too.
+                try { await SendAsync($"⚠️ Failed to register slash commands: {ex.Message}", CancellationToken.None); }
+                catch { /* best-effort — don't let a notification failure mask the original error */ }
+            }
         }
 
         _inboxWorker = Task.Run(() => ProcessInboxAsync(ct), CancellationToken.None);
