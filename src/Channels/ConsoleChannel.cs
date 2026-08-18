@@ -41,10 +41,10 @@ public sealed class ConsoleChannel : IOperatorChannel {
     // something db.AddMessage/AppendInteractionLog records, or ContextBuilder
     // will hand it to the model as if it were something typed to the agent.
     private const string AdminPrefix = "/admin ";
-    private readonly Dictionary<string, Func<CancellationToken, Task<string>>> _adminCommands = new();
+    private readonly Dictionary<string, Func<ulong, CancellationToken, Task<string>>> _adminCommands = new();
     private readonly Dictionary<string, Func<CancellationToken, Task<string>>> _userCommands = new();
 
-    public Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+    public Task RegisterCommandAsync(string name, string description, Func<ulong, CancellationToken, Task<string>> handler) {
         _adminCommands[name] = handler;
         return Task.CompletedTask;
     }
@@ -72,7 +72,11 @@ public sealed class ConsoleChannel : IOperatorChannel {
                 if (line.Trim().StartsWith(AdminPrefix, StringComparison.Ordinal)) {
                     var name = line.Trim()[AdminPrefix.Length..].Trim();
                     if (_adminCommands.TryGetValue(name, out var handler)) {
-                        try { Console.WriteLine($"\n{await handler(ct)}\n"); }
+                        // ConsoleUserId — the same sentinel MessageReceived
+                        // uses below, designed to equal the operator's
+                        // configured id when there's no real per-user
+                        // identity (see the field's remarks).
+                        try { Console.WriteLine($"\n{await handler(ConsoleUserId, ct)}\n"); }
                         catch (Exception ex) { await NotifyErrorAsync($"{AdminPrefix}{name} failed", ex, ct); }
                     } else {
                         Console.WriteLine($"[admin] unknown command: {name}");

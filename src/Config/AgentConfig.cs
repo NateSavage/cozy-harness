@@ -99,17 +99,28 @@ public sealed class ScheduleConfig {
 public sealed class ChannelConfig {
     public string OperatorName { get; set; } = "Nates";
     public string? DiscordToken { get; set; }
+    /// <summary>
+    /// Bot token for a SECOND, separate Discord application, used only for
+    /// admin commands ("/admin ..."). Optional — null (the default) keeps
+    /// today's behavior: admin commands register on the same bot as regular
+    /// DM messaging. When set, DiscordAdminChannel owns them instead and they
+    /// stop being registered on the main bot entirely — see Program.cs's
+    /// RegisterAdminCommandAsync.
+    /// </summary>
+    public string? AdminDiscordToken { get; set; }
     /// <summary>The operator's Discord user ID — DiscordChannel talks to them over DM, not a configured channel. Guild chat is out of scope for now.</summary>
     public ulong OperatorUserId { get; set; }
     /// <summary>
     /// Additional people allowed to DM the bot, beyond the operator (who's
     /// always implicitly allowed — no need to list them here too). A DM from
     /// anyone else is ignored outright: not queued, not logged, does not
-    /// wake the agent. Conversation history (IndexDb.RecentConversation) and
-    /// message logging are scoped per sender — see DisplayNameFor — but the
-    /// reply prompt itself (Seeds.ReplySystem) is still written as if talking
-    /// to the operator; a whitelisted sender gets attributed correctly, not
-    /// treated as a distinct relationship with its own framing, yet.
+    /// wake the agent. Conversation history (IndexDb.RecentConversation),
+    /// message logging (DisplayNameFor), AND the reply prompt's own framing
+    /// (Seeds.ReplySystemFor) are all scoped per sender — a whitelisted
+    /// sender is a distinct relationship with its own history and its own
+    /// prompt, correctly told apart from the operator, not attributed
+    /// correctly while the model is quietly told it's talking to the
+    /// operator regardless.
     ///
     /// See <see cref="AdminUsers"/> for the same DM access plus admin command
     /// access — an admin entry doesn't need to be duplicated here too.

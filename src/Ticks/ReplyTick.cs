@@ -27,9 +27,11 @@ public sealed class ReplyTick : ITick {
     private readonly LlmConfig _cfg;
     private readonly ChannelConfig _channelCfg;
     // Who to route the reply to — operator or a whitelisted sender (see
-    // Program.cs's ReplyFactory). Purely routing: history, logging, and the
-    // prompt below are still built as if talking to the operator, regardless
-    // of who this actually is.
+    // Program.cs's ReplyFactory). Not just routing: history, logging, AND
+    // the system-prompt framing (see BuildPrompt/Seeds.ReplySystemFor) are
+    // all scoped to whoever this actually is — a whitelisted sender gets
+    // their own conversation history and a prompt that correctly tells the
+    // model who it's talking to, not the operator's identity by default.
     private readonly ulong _replyToUserId;
 
     public ReplyTick(LlamaClient llm, IndexDb db, ContextBuilder ctx, IOperatorChannel channel, PeopleStore people,
@@ -150,7 +152,15 @@ public sealed class ReplyTick : ITick {
     /// drift from what a real reply actually sends.
     /// </summary>
     private string BuildPrompt(string contactId, string displayName) {
-        var p = _ctx.BeginStable(Seeds.ReplySystem);
+        // Which system prompt, not just whose history: the operator gets the
+        // fixed ReplySystemOperator text (unchanged), a whitelisted contact
+        // gets ReplySystemFor(displayName) — built with their actual name so
+        // the model is never left believing it's talking to its operator
+        // when it isn't. See the _replyToUserId field remarks.
+        var isOperator = _replyToUserId == _channelCfg.OperatorUserId;
+        var systemPrompt = isOperator ? Seeds.ReplySystemOperator : Seeds.ReplySystemFor(displayName);
+
+        var p = _ctx.BeginStable(systemPrompt);
         _ctx.AddRecentEpisodes(p, 6, 500);
         // The current conversation's own messages appear here too, at the
         // tail — this is the actual back-and-forth, not just what's new, so

@@ -762,6 +762,18 @@ in
       '';
     };
 
+    adminDiscordTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Path to a file containing the token for a SECOND, separate Discord
+        bot application used only for admin commands ("/admin ..." — goals,
+        chores, debug context). Optional; same LoadCredential delivery as
+        discordTokenFile, never through settings.
+
+      '';
+    };
+
     operatorDiscordUserId = lib.mkOption {
       type = lib.types.int;
       default = 0;
@@ -801,10 +813,11 @@ in
         not wake the agent.
 
         Conversation history and message logging are scoped and attributed
-        to each person by name — but the reply prompt itself
-        (Seeds.ReplySystem) is still written as if talking to the operator;
-        a whitelisted sender is correctly named, not treated as a distinct
-        relationship with its own framing, yet.
+        to each person by name, and the reply prompt itself
+        (Seeds.ReplySystemFor) is built fresh per sender too — a whitelisted
+        sender is a distinct relationship with its own framing, correctly
+        told apart from the operator, not just correctly named while the
+        model is quietly told it's talking to the operator regardless.
 
         See adminUsers below for the same DM access plus admin command
         access — no need to list someone in both.
@@ -839,6 +852,10 @@ in
 
         Listing someone here also grants them plain DM access, the same as
         allowedUsers — no need to list an admin in both.
+
+        Also governs who can use the separate admin bot when
+        adminDiscordTokenFile is set — one list either way, just a different
+        bot application answering it.
       '';
     };
 
@@ -1041,7 +1058,9 @@ in
             WorkingDirectory = cfg.home;
 
             LoadCredential = lib.optional (cfg.discordTokenFile != null)
-              "discord-token:${cfg.discordTokenFile}";
+              "discord-token:${cfg.discordTokenFile}"
+              ++ lib.optional (cfg.adminDiscordTokenFile != null)
+              "discord-admin-token:${cfg.adminDiscordTokenFile}";
 
             ProtectSystem = "strict";
             # NOT ProtectHome: the agent's home is where it lives.
@@ -1185,6 +1204,18 @@ in
           operatorDiscordUserId is unset (or 0). The bot talks to the operator
           over DM now, not a configured channel — it will start, connect, and
           have no one to DM, since a real Discord user ID is never 0.
+        '';
+      }
+      {
+        # Mirrors the discordTokenFile assertion above: the admin bot has no
+        # DM-messaging identity of its own to fall back on, so if neither the
+        # operator nor any adminUsers entry could ever reach it, it's a
+        # second bot connection that starts, connects, and can never be used.
+        assertion = cfg.adminDiscordTokenFile == null || operatorUserId != 0 || cfg.adminUsers != [ ];
+        message = ''
+          services.cozy-harness: adminDiscordTokenFile is set but neither
+          operatorDiscordUserId nor adminUsers grants anyone access to it —
+          every "/admin ..." invocation on that bot would be refused.
         '';
       }
     ];

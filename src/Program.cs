@@ -30,6 +30,11 @@ if (credentialsDir is not null) {
     var tokenPath = Path.Combine(credentialsDir, "discord-token");
     if (File.Exists(tokenPath))
         cfg.Channel.DiscordToken = File.ReadAllText(tokenPath).Trim();
+
+    // Same delivery mechanism, second credential — see ChannelConfig.AdminDiscordToken.
+    var adminTokenPath = Path.Combine(credentialsDir, "discord-admin-token");
+    if (File.Exists(adminTokenPath))
+        cfg.Channel.AdminDiscordToken = File.ReadAllText(adminTokenPath).Trim();
 }
 
 AgentTree tree = new(cfg.TreeRoot);
@@ -67,6 +72,15 @@ IOperatorChannel channel = string.IsNullOrEmpty(cfg.Channel.DiscordToken)
     : new DiscordChannel(cfg.Channel.DiscordToken!, cfg.Channel.OperatorUserId,
                           cfg.Channel.AllowedUsers.Select(u => u.UserId),
                           cfg.Channel.AdminUsers.Select(u => u.UserId), activity);
+
+// Optional — see ChannelConfig.AdminDiscordToken. Null means admin commands
+// stay on `channel` above, same as before this existed; RegisterAdminCommandAsync
+// below is what actually decides where each one lands, so nothing else needs
+// to branch on this.
+IAdminChannel? adminChannel = string.IsNullOrEmpty(cfg.Channel.AdminDiscordToken)
+    ? null
+    : new DiscordAdminChannel(cfg.Channel.AdminDiscordToken!, cfg.Channel.OperatorUserId,
+                               cfg.Channel.AdminUsers.Select(u => u.UserId));
 
 var feeds = new List<IFeed> { new WatchedDirectoryFeed(cfg.Feeds.WatchedDirectory) };
 if (!string.IsNullOrEmpty(cfg.Feeds.GitHubUser))
@@ -114,7 +128,19 @@ channel.MessageReceived += async (userId, discordName, content) => {
     await scheduler.HandleInboundAsync(userId, cts.Token);
 };
 
-await channel.RegisterCommandAsync("goals", "List active goals", ct => {
+// Every admin command goes through here rather than calling
+// channel.RegisterCommandAsync directly, so this is the one place that
+// decides where "/admin ..." actually lives: the dedicated admin bot when
+// AdminDiscordToken is configured, otherwise `channel` itself — today's
+// behavior, unchanged, for deployments that haven't set up a second bot
+// (or are running ConsoleChannel locally). Command names and handlers are
+// identical either way.
+Task RegisterAdminCommandAsync(string name, string description, Func<ulong, CancellationToken, Task<string>> handler) =>
+    adminChannel is not null
+        ? adminChannel.RegisterCommandAsync(name, description, handler)
+        : channel.RegisterCommandAsync(name, description, handler);
+
+await RegisterAdminCommandAsync("goals", "List active goals", (_, ct) => {
     var goals = db.ActiveGoals();
     var text = goals.Count == 0
         ? "No active goals."
@@ -176,16 +202,23 @@ await channel.RegisterWhitelistedCommandAsync("context", "Show context window us
 // subcommand group" (Discord doesn't allow spaces in a single subcommand
 // name, so a literal `/admin debug context` invocation requires that
 // nesting). See IOperatorChannel.RegisterCommandAsync.
-await channel.RegisterCommandAsync("debug context", "Dump the exact prompt built for the operator's current conversation", ct => {
+await RegisterAdminCommandAsync("debug context", "Dump the exact prompt built for your current conversation", (invokerId, ct) => {
     // Constructing the real ReplyTick (rather than reassembling the prompt
     // by hand here) is what guarantees "exact" — same class, same fields,
     // same BuildPrompt the real reply path calls, just via the preview
     // method instead of RunAsync so nothing is sent and no LLM call happens.
-    var tick = new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel, cfg.Channel.OperatorUserId);
+    //
+    // invokerId, not cfg.Channel.OperatorUserId: with more than one admin,
+    // hardcoding the operator here meant every admin's "debug context" dumped
+    // the OPERATOR's conversation — including its content — regardless of
+    // who asked. RecentConversation is scoped per contactId (see IndexDb),
+    // so this must be scoped the same way: whoever actually typed the
+    // command sees their own conversation, never someone else's.
+    var tick = new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel, invokerId);
     return Task.FromResult(tick.BuildPromptPreview());
 });
 
-await channel.RegisterCommandAsync("chores", "List active chores", ct => {
+await RegisterAdminCommandAsync("chores", "List active chores", (_, ct) => {
     var chores = db.ActiveChores();
     var text = chores.Count == 0
         ? "No active chores."
@@ -196,6 +229,7 @@ await channel.RegisterCommandAsync("chores", "List active chores", ct => {
 });
 
 await channel.StartAsync(cts.Token);
+if (adminChannel is not null) await adminChannel.StartAsync(cts.Token);
 
 Console.WriteLine($"[harness] running. tree={cfg.TreeRoot} tz={cfg.OperatorTimeZone}");
 
@@ -213,3 +247,5 @@ await scheduler.RunAsync(cts.Token);
 
 if (channel is IAsyncDisposable disposableChannel)
     await disposableChannel.DisposeAsync();
+if (adminChannel is IAsyncDisposable disposableAdminChannel)
+    await disposableAdminChannel.DisposeAsync();

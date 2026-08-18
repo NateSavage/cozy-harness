@@ -22,13 +22,15 @@ namespace CozyHarness.Channels;
 /// The whitelist is a gate and a routing table, nothing more: a message from
 /// an allowed non-operator sender is queued and replied to like any other,
 /// routed back to THEIR OWN DM channel (see GetOrResolveDmChannelAsync /
-/// ReplyToAsync) rather than the operator's — but conversation history,
-/// message logging, and the reply prompt itself are all still built as if
-/// talking to the operator specifically. Control-plane affordances
-/// (interrupt buttons, and SendAsync's proactive sends — WorkTick's
-/// message_operator, stuck/error/sensitive notices) stay operator-only —
-/// admins are trusted with admin commands, not with the operator's own
-/// control-plane identity.
+/// ReplyToAsync) rather than the operator's. Conversation history, message
+/// logging, and the reply prompt's own framing (see ReplyTick.BuildPrompt /
+/// Seeds.ReplySystemFor) are all scoped to whoever's actually in that
+/// conversation — a whitelisted sender is a distinct relationship with its
+/// own history and its own prompt, not the operator's identity worn as a
+/// mask. Control-plane affordances (interrupt buttons, and SendAsync's
+/// proactive sends — WorkTick's message_operator, stuck/error/sensitive
+/// notices) stay operator-only regardless — admins are trusted with admin
+/// commands, not with the operator's own control-plane identity.
 ///
 /// Because DMs are exempt from the Message Content privileged intent (a bot
 /// always sees the content of DMs it's a party to, regardless), this needs no
@@ -125,7 +127,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     // Filled by RegisterCommandAsync (before StartAsync), registered with
     // Discord as subcommands of a single global "admin" command once login
     // succeeds — see StartAsync and AdminCommandName. Operator + AdminUsers.
-    private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _adminCommands = new();
+    private readonly Dictionary<string, (string Description, Func<ulong, CancellationToken, Task<string>> Handler)> _adminCommands = new();
     // Filled by RegisterWhitelistedCommandAsync — each its own standalone
     // top-level global command, not grouped under "admin". Operator + whitelist.
     private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _userCommands = new();
@@ -178,7 +180,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         _activity.Changed += OnActivityChanged;
     }
 
-    public Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler) {
+    public Task RegisterCommandAsync(string name, string description, Func<ulong, CancellationToken, Task<string>> handler) {
         _adminCommands[name] = (description, handler);
         return Task.CompletedTask;
     }
@@ -592,7 +594,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
                 return;
             }
 
-            await RespondFromHandlerAsync(command, $"/{AdminCommandName} {sub}", adminEntry.Handler);
+            // command.User.Id — not _operatorUserId — so a per-conversation
+            // command like "debug context" answers for whoever actually
+            // typed it. See RegisterCommandAsync's doc.
+            var invokerId = command.User.Id;
+            await RespondFromHandlerAsync(command, $"/{AdminCommandName} {sub}", ct => adminEntry.Handler(invokerId, ct));
             return;
         }
 
@@ -718,9 +724,9 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     /// <summary>
     /// A reply addressed to whoever actually sent the inbound message — the
     /// operator, or a whitelisted sender routed to their own DM channel. See
-    /// class remarks: everything ReplyTick builds around this send is still
-    /// operator-framed regardless of who userId is; this only controls where
-    /// the words end up.
+    /// class remarks: this only controls where the words end up — the words
+    /// themselves (ReplyTick's prompt and framing) are built separately, and
+    /// are correctly scoped to userId, not the operator, by that point.
     /// </summary>
     public async Task ReplyToAsync(ulong userId, string content, CancellationToken ct)
     {

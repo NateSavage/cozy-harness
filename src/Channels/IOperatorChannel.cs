@@ -52,6 +52,18 @@ public interface IOperatorChannel {
     /// for this: it matches the whole "/admin "-prefixed remainder as one
     /// string either way.
     ///
+    /// The handler receives the invoking user's id as its first argument —
+    /// the operator or one of AdminUsers, whichever actually typed the
+    /// command (ConsoleChannel passes its fixed ConsoleUserId sentinel,
+    /// which is designed to equal the operator's id when there's no real
+    /// Discord identity). This exists so a command whose answer is
+    /// per-conversation (e.g. "debug context") can build it for whoever
+    /// asked rather than defaulting to the operator — see Program.cs's
+    /// registration of "debug context" for why this matters: with more than
+    /// one admin, silently answering for the operator instead of the actual
+    /// caller means one admin's debug output can leak another person's
+    /// conversation.
+    ///
     /// Hard requirement, not an incidental property, and shared with
     /// RegisterWhitelistedCommandAsync below: a command invocation and its
     /// handler's response must never reach the model's context. Neither side
@@ -64,7 +76,7 @@ public interface IOperatorChannel {
     /// be anything RecentConversation/ContextBuilder pulls in as if it were
     /// something the agent said or was told.
     /// </summary>
-    Task RegisterCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler);
+    Task RegisterCommandAsync(string name, string description, Func<ulong, CancellationToken, Task<string>> handler);
 
     /// <summary>
     /// Same contract as RegisterCommandAsync — including the hard
@@ -87,7 +99,8 @@ public interface IOperatorChannel {
     /// channel, not necessarily the operator's (see DiscordChannel's
     /// per-sender channel cache). This is purely message routing: the
     /// conversation history and prompt ReplyTick builds around this send are
-    /// still operator-framed regardless of who userId actually is.
+    /// scoped and framed for whoever userId actually is, not the operator by
+    /// default — see ReplyTick.BuildPrompt and Seeds.ReplySystemFor.
     /// </summary>
     Task ReplyToAsync(ulong userId, string content, CancellationToken ct);
 
