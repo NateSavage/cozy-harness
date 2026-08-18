@@ -18,6 +18,20 @@ var cfg = File.Exists(configPath)
         new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!
     : new AgentConfig();
 
+// The bot token never goes through agent.json (it would land in the
+// world-readable Nix store — see the module's discordTokenFile option). It's
+// delivered instead via systemd's LoadCredential, mounted at
+// $CREDENTIALS_DIRECTORY/discord-token — the same mechanism the model-download
+// service already uses. Bridge it into config here; if it's absent (no
+// CREDENTIALS_DIRECTORY, e.g. running outside the unit) Channel.DiscordToken
+// stays empty and Program falls back to ConsoleChannel below, same as today.
+var credentialsDir = Environment.GetEnvironmentVariable("CREDENTIALS_DIRECTORY");
+if (credentialsDir is not null) {
+    var tokenPath = Path.Combine(credentialsDir, "discord-token");
+    if (File.Exists(tokenPath))
+        cfg.Channel.DiscordToken = File.ReadAllText(tokenPath).Trim();
+}
+
 AgentTree tree = new(cfg.TreeRoot);
 tree.EnsureLayout();
 
