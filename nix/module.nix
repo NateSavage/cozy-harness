@@ -46,6 +46,16 @@ let
       # permission comes from the directory, not the file.
       preStart = "${pkgs.coreutils}/bin/rm -f ${socketPath}";
 
+      # A model that fails to load fails identically every time (bad path,
+      # unsupported architecture, OOM) — RestartSec=10 was letting that retry
+      # forever (seen: 11 restarts and counting on a config error that no
+      # amount of waiting fixes). Two attempts within a window comfortably
+      # covering both is enough to rule out a one-off fluke without spinning
+      # forever on something that needs a human. `systemctl reset-failed`
+      # clears it once the actual problem's fixed.
+      startLimitIntervalSec = 30;
+      startLimitBurst = 2;
+
       serviceConfig = {
         Type = "simple";
         ExecStart = lib.escapeShellArgs ([
