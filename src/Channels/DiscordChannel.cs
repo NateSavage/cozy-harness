@@ -98,6 +98,19 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     // quiet hours must not silently flip the bot back to looking awake.
     private volatile bool _away;
 
+    // Completes 2s after the most recent Ready — see OnReadyRestorePresence.
+    // Sending ANY presence update too soon after Ready (status OR activity;
+    // both end up on the same gateway presence-update path) risks
+    // Discord.Net#1701's InvalidSession/reconnect loop, which looks exactly
+    // like "always offline" from the outside. Replaced with a fresh, still-
+    // pending instance on every Ready (including reconnects) — SyncActivityAsync
+    // and SyncStatusAsync both await the CURRENT one before touching _client,
+    // regardless of which of the several places that can trigger them
+    // (OnActivityChanged, a reply's typing indicator, the Ready restore
+    // itself) fired first. A bare `= new()` here means nothing can jump the
+    // gate before the very first Ready either.
+    private volatile TaskCompletionSource<bool> _settled = new();
+
     // Filled by RegisterCommandAsync (before StartAsync), registered with
     // Discord as subcommands of a single global "admin" command once login
     // succeeds — see StartAsync and AdminCommandName. Operator-only.
@@ -174,10 +187,22 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     /// settle by 2s.
     /// </summary>
     private Task OnReadyRestorePresence() {
-        // SyncStatusAsync already catches and logs its own failures — nothing
-        // left here that needs its own try/catch.
+        // A local reference, completed by this closure specifically — not
+        // "whatever _settled currently is" when the delay elapses. Under a
+        // fast flapping reconnect, a second Ready can fire and replace
+        // _settled before this first delay is up; without capturing settled
+        // locally, this stale timer would then complete the SECOND Ready's
+        // gate early, from the FIRST Ready's countdown, undoing the very
+        // protection this exists for.
+        var settled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _settled = settled;
+
+        // SyncStatusAsync/SyncActivityAsync already catch and log their own
+        // failures — nothing left here that needs its own try/catch.
         _ = Task.Run(async () => {
             await Task.Delay(TimeSpan.FromSeconds(2));
+            settled.TrySetResult(true);
+            await SyncActivityAsync();
             await SyncStatusAsync();
         });
         return Task.CompletedTask;
@@ -336,6 +361,10 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
                     var channel = await GetOrResolveDmChannelAsync(msg.Author.Id);
                     typing = channel.EnterTypingState();
+                    // Direct call, not SyncActivityAsync — still needs the
+                    // same _settled gate (see its remarks): a message can
+                    // arrive and reach here within 2s of a reconnect too.
+                    await _settled.Task;
                     await _client.SetGameAsync("a reply taking shape", type: ActivityType.Watching);
                 }
                 catch { /* best-effort; a presence hiccup shouldn't block the actual reply */ }
@@ -535,6 +564,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     /// </summary>
     private async Task SyncActivityAsync()
     {
+        // See _settled's remarks — this can be reached well before the first
+        // Ready (OnActivityChanged fires the moment a tick starts) or
+        // immediately after a reconnect, both of which are exactly when
+        // sending this too early would matter.
+        await _settled.Task;
         try
         {
             if (_activity.CurrentTick is null) await _client.SetGameAsync(null);
@@ -558,6 +592,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     /// </summary>
     private async Task SyncStatusAsync()
     {
+        await _settled.Task;   // see _settled's remarks
         try
         {
             var status = _activity.Important ? UserStatus.DoNotDisturb
