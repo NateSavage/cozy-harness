@@ -90,9 +90,6 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     // contact rather than all up front — most configured entries may never
     // actually message it.
     private readonly Dictionary<ulong, IDMChannel> _otherDmChannels = new();
-    // Per sender, so a reply to one whitelisted person can't thread onto a
-    // different person's (or the operator's) most recent message.
-    private readonly Dictionary<ulong, ulong> _lastInboundMessageId = new();
     private Task? _inboxWorker;
     // Read by SyncStatusAsync (whenever it recomputes, including after a
     // reconnect), written by SetAwayAsync — a gateway drop-and-resume during
@@ -121,6 +118,13 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _userCommands = new();
 
     public event Func<ulong, string, string, Task>? MessageReceived;
+
+    // _client.CurrentUser is populated once the gateway Ready fires, which
+    // StartAsync already awaits before returning — so this is safe any time
+    // after that, same as _dmChannel. GlobalName over Username for the same
+    // reason OnGatewayMessageAsync prefers it for contacts: Discord's newer
+    // display-name concept, falling back for older accounts that never set one.
+    public string AgentDisplayName => _client.CurrentUser?.GlobalName ?? _client.CurrentUser?.Username ?? "the agent";
 
     public DiscordChannel(string token, ulong operatorUserId, IEnumerable<ulong> allowedUserIds, AgentActivity activity)
     {
@@ -405,7 +409,6 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         {
             await foreach (var (msg, text) in _inbox.Reader.ReadAllAsync(ct))
             {
-                _lastInboundMessageId[msg.Author.Id] = msg.Id;
                 var handler = MessageReceived;
                 if (handler is null) continue;
 
@@ -692,7 +695,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     public async Task SendAsync(string content, CancellationToken ct)
     {
         var channel = await GetOrResolveDmChannelAsync(_operatorUserId);
-        await SendToChannelAsync(channel, _operatorUserId, content, ct);
+        await SendToChannelAsync(channel, content, ct);
     }
 
     /// <summary>
@@ -705,28 +708,28 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     public async Task ReplyToAsync(ulong userId, string content, CancellationToken ct)
     {
         var channel = await GetOrResolveDmChannelAsync(userId);
-        await SendToChannelAsync(channel, userId, content, ct);
+        await SendToChannelAsync(channel, content, ct);
     }
 
-    private async Task SendToChannelAsync(IDMChannel channel, ulong recipientId, string content, CancellationToken ct)
+    /// <summary>
+    /// Plain sequential messages, deliberately not threaded as Discord
+    /// replies (no messageReference). That threading existed once, but a DM
+    /// is 1:1 — there's no other participant a reply could be mistaken for
+    /// responding to, so the reply-preview UI was pure noise here, unlike in
+    /// a busy multi-person channel where it disambiguates. SendBusyNoticeAsync
+    /// is the one deliberate exception: it threads to the specific message
+    /// that triggered its Interrupt/Let-it-finish buttons, which is a real
+    /// disambiguation need (several messages could arrive in a row) rather
+    /// than this general case.
+    /// </summary>
+    private async Task SendToChannelAsync(IDMChannel channel, string content, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(content)) return;   // Discord rejects an empty message body outright
 
-        // The first chunk threads to whatever this recipient most recently
-        // sent, then the reference is consumed — a later, unprompted send
-        // (WorkTick's message_operator, SayStuckAsync) shouldn't look like a
-        // reply to an old conversation just because nothing newer came in.
-        var reference = _lastInboundMessageId.TryGetValue(recipientId, out var id) ? new MessageReference(id) : null;
-        _lastInboundMessageId.Remove(recipientId);
-
-        var first = true;
         foreach (var chunk in Chunk(content))
         {
             ct.ThrowIfCancellationRequested();
-            await channel.SendMessageAsync(chunk,
-                allowedMentions: NoMentions,
-                messageReference: first ? reference : null);
-            first = false;
+            await channel.SendMessageAsync(chunk, allowedMentions: NoMentions);
         }
     }
 

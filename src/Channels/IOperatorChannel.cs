@@ -14,6 +14,16 @@ public interface IOperatorChannel {
 
     Task StartAsync(CancellationToken ct);
 
+    /// <summary>
+    /// What the agent is currently called on this channel — Discord's own
+    /// display name for the bot's account, read live rather than configured
+    /// separately, the same reasoning as why contact names come from
+    /// PeopleStore/Discord rather than a static string: it can't drift out
+    /// of sync with what the person on the other end actually sees. Only
+    /// meaningful after StartAsync has completed.
+    /// </summary>
+    string AgentDisplayName { get; }
+
     /// <summary>Always to the operator specifically — proactive messages (WorkTick's message_operator, stuck/error/sensitive notices) are never meant for anyone else on the whitelist.</summary>
     Task SendAsync(string content, CancellationToken ct);
 

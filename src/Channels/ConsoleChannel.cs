@@ -17,6 +17,9 @@ public sealed class ConsoleChannel : IOperatorChannel {
 
     public event Func<ulong, string, string, Task>? MessageReceived;
 
+    // No live Discord identity to read here — just a fixed stand-in.
+    public string AgentDisplayName => "the agent";
+
     // Console has no real per-user identity — everything typed here is "the
     // operator" as far as the rest of the harness is concerned, and there's
     // no live display name to report (ConsoleUserId == OperatorUserId is the

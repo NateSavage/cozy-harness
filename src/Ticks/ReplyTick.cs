@@ -103,6 +103,25 @@ public sealed class ReplyTick : ITick {
         await _channel.ReplyToAsync(_replyToUserId, r.Reply, ct);
         _db.AddMessage("out", displayName, r.Reply, contactId);
 
+        // Told to whoever's actually in this conversation, not the operator
+        // — separate from NotifyOperatorOnSensitive below, which is a
+        // distinct oversight preference, not this. Discord has no real
+        // "ephemeral" concept for a plain DM (that's an interaction-response
+        // feature — slash commands and buttons only, and there's no
+        // interaction here to attach it to); a DM is already private to the
+        // two of them, so a short standalone follow-up is the honest
+        // equivalent rather than pretending this is more hidden than it is.
+        //
+        // Hard requirement, not an incidental property: this notice must
+        // never reach the model's context. It's sent via ReplyToAsync
+        // directly — never passed to _db.AddMessage, never folded into
+        // r.Reply (which IS what got recorded above), never given to
+        // AppendInteractionLog. RecentConversation/RecentEpisodes/episode
+        // bodies — everything ContextBuilder ever reads from — can only see
+        // it if a future edit starts logging it; don't.
+        if (r.Sensitive)
+            await _channel.ReplyToAsync(_replyToUserId, $"> **{_channel.AgentDisplayName} will remember this conversation is sensitive**", ct);
+
         var now = DateTimeOffset.UtcNow;
         foreach (var (id, content) in pending) {
             _people.AppendInteractionLog(peopleSlug, now, $"**{displayName}:** {content}", r.Sensitive);
@@ -151,8 +170,7 @@ public sealed class ReplyTick : ITick {
             }
 
             Mark sensitive if this conversation touches something personal or
-            private. Your operator is told when that happens; he asked to be.
-            It is not hidden from anyone.
+            private.
             """);
     }
 
