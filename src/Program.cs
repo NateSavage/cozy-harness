@@ -65,7 +65,8 @@ AgentActivity activity = new();
 IOperatorChannel channel = string.IsNullOrEmpty(cfg.Channel.DiscordToken)
     ? new ConsoleChannel(activity)
     : new DiscordChannel(cfg.Channel.DiscordToken!, cfg.Channel.OperatorUserId,
-                          cfg.Channel.AllowedUsers.Select(u => u.UserId), activity);
+                          cfg.Channel.AllowedUsers.Select(u => u.UserId),
+                          cfg.Channel.AdminUsers.Select(u => u.UserId), activity);
 
 var feeds = new List<IFeed> { new WatchedDirectoryFeed(cfg.Feeds.WatchedDirectory) };
 if (!string.IsNullOrEmpty(cfg.Feeds.GitHubUser))

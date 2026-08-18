@@ -110,8 +110,21 @@ public sealed class ChannelConfig {
     /// reply prompt itself (Seeds.ReplySystem) is still written as if talking
     /// to the operator; a whitelisted sender gets attributed correctly, not
     /// treated as a distinct relationship with its own framing, yet.
+    ///
+    /// See <see cref="AdminUsers"/> for the same DM access plus admin command
+    /// access — an admin entry doesn't need to be duplicated here too.
     /// </summary>
     public List<AllowedContact> AllowedUsers { get; set; } = new();
+    /// <summary>
+    /// Discord user IDs trusted with admin command access (<c>/admin ...</c>
+    /// in Discord), on top of the operator, who always has it implicitly.
+    /// Listing someone here also grants them DM access same as AllowedUsers
+    /// — no need to list an admin in both. See DiscordChannel's remarks on
+    /// AdminCommandName for what "admin command access" actually exposes
+    /// (goals/chores/debug — a materially bigger trust grant than the plain
+    /// DM whitelist).
+    /// </summary>
+    public List<AllowedContact> AdminUsers { get; set; } = new();
     /// <summary>Soft budget: surfaced to the agent so reaching out is a visible choice, never blocked.</summary>
     public int SoftOutboundBudgetPerDay { get; set; } = 12;
     /// <summary>Operator asked to be told when a conversation is marked sensitive.</summary>
@@ -133,15 +146,17 @@ public sealed class ChannelConfig {
 
     /// <summary>
     /// The display label for whoever userId actually is: the operator's own
-    /// name, or the name configured for them in AllowedUsers. Falls back to
-    /// OperatorName for an unrecognized id so callers never need to
-    /// null-check — in practice this is only ever called with an id that
-    /// already passed DiscordChannel's whitelist gate.
+    /// name, or the name configured for them in AllowedUsers or AdminUsers.
+    /// Falls back to OperatorName for an unrecognized id so callers never
+    /// need to null-check — in practice this is only ever called with an id
+    /// that already passed DiscordChannel's whitelist gate.
     /// </summary>
     public string DisplayNameFor(ulong userId) =>
         userId == OperatorUserId
             ? OperatorName
-            : AllowedUsers.FirstOrDefault(u => u.UserId == userId)?.Name ?? OperatorName;
+            : AllowedUsers.FirstOrDefault(u => u.UserId == userId)?.Name
+              ?? AdminUsers.FirstOrDefault(u => u.UserId == userId)?.Name
+              ?? OperatorName;
 }
 
 public sealed class AllowedContact {

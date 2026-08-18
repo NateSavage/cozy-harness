@@ -805,6 +805,40 @@ in
         (Seeds.ReplySystem) is still written as if talking to the operator;
         a whitelisted sender is correctly named, not treated as a distinct
         relationship with its own framing, yet.
+
+        See adminUsers below for the same DM access plus admin command
+        access — no need to list someone in both.
+      '';
+    };
+
+    adminUsers = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          discordUserId = lib.mkOption {
+            type = lib.types.int;
+            description = "Their Discord user ID (a snowflake).";
+          };
+          name = lib.mkOption {
+            type = lib.types.str;
+            description = ''
+              Display label used for logging and conversation attribution —
+              same reasoning as allowedUsers' name option.
+            '';
+          };
+        };
+      });
+      default = [ ];
+      example = [ { discordUserId = 222222222222222222; name = "Sam"; } ];
+      description = ''
+        Discord user IDs trusted with admin command access ("/admin ...":
+        goals, chores, debug context, whatever else RegisterCommandAsync
+        registers), on top of the operator, who always has it implicitly.
+        This is a materially bigger trust grant than the plain DM whitelist
+        above — these are the same commands the operator gets, not a
+        read-only subset.
+
+        Listing someone here also grants them plain DM access, the same as
+        allowedUsers — no need to list an admin in both.
       '';
     };
 
@@ -855,6 +889,7 @@ in
       # (case-insensitive) — discordUserId/name above are just this
       # module's own, more self-explanatory option names for the same thing.
       channel.allowedUsers = map (u: { userId = u.discordUserId; name = u.name; }) cfg.allowedUsers;
+      channel.adminUsers = map (u: { userId = u.discordUserId; name = u.name; }) cfg.adminUsers;
       channel.conversationGapMinutes = cfg.conversationGapMinutes;
       channel.contextWarningThreshold = cfg.contextWarningThreshold;
       feeds.githubUser = cfg.githubUser;

@@ -9,10 +9,15 @@ namespace CozyHarness.Channels;
 
 /// <summary>
 /// Discord.Net gateway client. The operator plus an optional whitelist of
-/// additional Discord user IDs (AgentConfig.ChannelConfig.AllowedUserIds),
+/// additional Discord user IDs (AgentConfig.ChannelConfig.AllowedUsers),
 /// all reached over DM — not a configured channel. Guild chat is deliberately
 /// out of scope for now: guild messages are ignored entirely (see
 /// OnGatewayMessageAsync).
+///
+/// A second, narrower list (AgentConfig.ChannelConfig.AdminUsers) grants
+/// admin command access ("/admin ...") on top of DM access — everyone in it
+/// is also implicitly in the plain whitelist, so it's a strict superset, not
+/// a separate track. See AdminCommandName and OnSlashCommandExecutedAsync.
 ///
 /// The whitelist is a gate and a routing table, nothing more: a message from
 /// an allowed non-operator sender is queued and replied to like any other,
@@ -21,7 +26,9 @@ namespace CozyHarness.Channels;
 /// message logging, and the reply prompt itself are all still built as if
 /// talking to the operator specifically. Control-plane affordances
 /// (interrupt buttons, and SendAsync's proactive sends — WorkTick's
-/// message_operator, stuck/error/sensitive notices) stay operator-only.
+/// message_operator, stuck/error/sensitive notices) stay operator-only —
+/// admins are trusted with admin commands, not with the operator's own
+/// control-plane identity.
 ///
 /// Because DMs are exempt from the Message Content privileged intent (a bot
 /// always sees the content of DMs it's a party to, regardless), this needs no
@@ -66,7 +73,8 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
     // Every RegisterCommandAsync'd command is a subcommand of this one — see
     // IOperatorChannel.RegisterCommandAsync — so the name itself reads as
-    // operator-only in Discord's UI, not just enforced silently.
+    // privileged (operator + AdminUsers) in Discord's UI, not just enforced
+    // silently.
     private const string AdminCommandName = "admin";
 
     private static readonly Regex FenceDelimiter =
@@ -80,6 +88,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private readonly string _token;
     private readonly ulong _operatorUserId;
     private readonly HashSet<ulong> _allowedUserIds;
+    // Operator-equivalent for admin command access ("/admin ..."), never for
+    // DM access on its own — every id in here is also folded into
+    // _allowedUserIds (see the constructor), so admin status is a superset
+    // of the plain whitelist, not a separate track.
+    private readonly HashSet<ulong> _adminUserIds;
     private readonly AgentActivity _activity;
     private readonly DiscordSocketClient _client;
     private readonly Channel<(SocketMessage Msg, string Text)> _inbox =
@@ -111,7 +124,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
     // Filled by RegisterCommandAsync (before StartAsync), registered with
     // Discord as subcommands of a single global "admin" command once login
-    // succeeds — see StartAsync and AdminCommandName. Operator-only.
+    // succeeds — see StartAsync and AdminCommandName. Operator + AdminUsers.
     private readonly Dictionary<string, (string Description, Func<CancellationToken, Task<string>> Handler)> _adminCommands = new();
     // Filled by RegisterWhitelistedCommandAsync — each its own standalone
     // top-level global command, not grouped under "admin". Operator + whitelist.
@@ -126,7 +139,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     // display-name concept, falling back for older accounts that never set one.
     public string AgentDisplayName => _client.CurrentUser?.GlobalName ?? _client.CurrentUser?.Username ?? "the agent";
 
-    public DiscordChannel(string token, ulong operatorUserId, IEnumerable<ulong> allowedUserIds, AgentActivity activity)
+    public DiscordChannel(string token, ulong operatorUserId, IEnumerable<ulong> allowedUserIds, IEnumerable<ulong> adminUserIds, AgentActivity activity)
     {
         // A real Discord snowflake is never 0 — this is the default `ulong`
         // when OperatorUserId is left unset in config. Left unchecked, the bot
@@ -139,7 +152,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
         _token = token;
         _operatorUserId = operatorUserId;
+        _adminUserIds = new HashSet<ulong>(adminUserIds);
+        // Admins get DM access too — AgentConfig.AdminUsers doesn't need a
+        // matching entry in AllowedUsers to also unlock the plain whitelist.
         _allowedUserIds = new HashSet<ulong>(allowedUserIds);
+        _allowedUserIds.UnionWith(_adminUserIds);
         _activity = activity;
 
         _client = new DiscordSocketClient(new DiscordSocketConfig
@@ -285,7 +302,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         {
             var admin = new SlashCommandBuilder()
                 .WithName(AdminCommandName)
-                .WithDescription("Operator-only commands")
+                .WithDescription("Operator and admin-only commands")
                 .WithContextTypes(dmContexts)
                 .WithIntegrationTypes(guildInstall);
 
@@ -533,7 +550,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
     /// <summary>
     /// Dispatches to whichever tier registered the command — "admin"
-    /// (operator-only, subcommands — see RegisterCommandAsync) or a
+    /// (operator + AdminUsers, subcommands — see RegisterCommandAsync) or a
     /// standalone top-level command (operator + whitelist — see
     /// RegisterWhitelistedCommandAsync). Slash commands are a separate event
     /// path from regular DMs entirely, so a whitelisted non-operator sender
@@ -552,9 +569,9 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     {
         if (command.Data.Name == AdminCommandName)
         {
-            if (command.User.Id != _operatorUserId)
+            if (command.User.Id != _operatorUserId && !_adminUserIds.Contains(command.User.Id))
             {
-                await command.RespondAsync("This command is only available to the operator.", ephemeral: true);
+                await command.RespondAsync("This command is only available to the operator and admins.", ephemeral: true);
                 return;
             }
 

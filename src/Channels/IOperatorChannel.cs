@@ -32,10 +32,12 @@ public interface IOperatorChannel {
     /// line in ConsoleChannel) whose handler returns the text to show back.
     /// Call once per command, before StartAsync, from Program.cs — the
     /// channel stays domain-agnostic; whoever registers supplies the actual
-    /// lookup (querying IndexDb, etc.). Operator-only, unconditionally: this
-    /// is a control-plane surface like the interrupt buttons, not something
-    /// extended to the whitelist — see RegisterWhitelistedCommandAsync for
-    /// that.
+    /// lookup (querying IndexDb, etc.). Operator + AgentConfig.ChannelConfig.AdminUsers
+    /// only: a materially bigger trust grant than the plain DM whitelist, not
+    /// something extended to it — see RegisterWhitelistedCommandAsync for
+    /// that. Distinct from the control-plane surfaces that stay operator-only
+    /// unconditionally (interrupt buttons, SendAsync's proactive sends) —
+    /// admins get this, not the operator's own identity.
     ///
     /// Every command registered here is grouped under a single "admin"
     /// command — `/admin goals`, `/admin chores`, etc. in Discord — so the
@@ -67,13 +69,15 @@ public interface IOperatorChannel {
     /// <summary>
     /// Same contract as RegisterCommandAsync — including the hard
     /// context-isolation requirement documented there — except the audience
-    /// is the operator OR anyone on ChannelConfig.AllowedUsers, not the
+    /// is the operator OR anyone on ChannelConfig.AllowedUsers (AdminUsers
+    /// included — they're implicitly on the plain whitelist too), not the
     /// operator alone. Registered as its own standalone top-level command
     /// (`/context`, typed the same in ConsoleChannel), deliberately NOT
-    /// grouped under "admin": that name means operator-only, and this isn't.
-    /// Reserve this for things that are safe to hand to anyone allowed to DM
-    /// the agent at all — operational counters like /context, not anything
-    /// that touches goals, chores, or other people's conversations.
+    /// grouped under "admin": that name means the narrower operator+admin
+    /// tier, and this isn't. Reserve this for things that are safe to hand
+    /// to anyone allowed to DM the agent at all — operational counters like
+    /// /context, not anything that touches goals, chores, or other people's
+    /// conversations.
     /// </summary>
     Task RegisterWhitelistedCommandAsync(string name, string description, Func<CancellationToken, Task<string>> handler);
 
