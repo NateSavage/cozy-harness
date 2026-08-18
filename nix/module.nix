@@ -25,19 +25,12 @@ let
   # assertion at the bottom of this file.
   operatorUserId = cfg.operatorDiscordUserId;
 
-  waitForServer = name: socketPath: pkgs.writeShellScript "wait-llama-${name}" ''
-    # CPU inference with --mlock takes a while to become ready. The harness
-    # tolerates a dead server (a crashed tick is recorded like any other), but
-    # starting into a wall of failures pollutes the episode log on day one.
-    for i in $(seq 1 300); do
-      if ${pkgs.curl}/bin/curl -sf --unix-socket ${socketPath} http://localhost/health >/dev/null; then
-        exit 0
-      fi
-      sleep 2
-    done
-    echo "llama-server at ${socketPath} never became healthy" >&2
-    exit 1
-  '';
+  # Readiness waiting for llama-main/llama-pulse happens inside the harness
+  # itself now (LlamaClient.WaitForHealthyAsync, called from Program.cs),
+  # after the process — and therefore this systemd unit — is already
+  # "started". It used to block here in preStart instead, which meant CPU
+  # model load time (minutes, under --mlock) raced against systemd's own
+  # startup timeout for no reason; see cozy-harness.service below.
 
   mkLlamaService = { name, model, ctxSize, parallel, quantKv, memoryMin, mtp ? false, extraFlags ? [ ] }:
     let socketPath = socketPathFor name; in {
@@ -352,6 +345,7 @@ in
 
     mainModel = lib.mkOption {
       type = lib.types.str;
+      default = "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf";
       example = "gemma-4-26B-A4B-it-Q4_K_M.gguf";
       description = ''
         Filename (within modelDirectory) of the main model.
@@ -374,6 +368,7 @@ in
 
     pulseModel = lib.mkOption {
       type = lib.types.str;
+      default = "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf";
       example = "gemma-4-E4B-it-Q4_K_M.gguf";
       description = ''
         Small model for the pulse tick. Its only job is deciding whether anything
@@ -383,7 +378,7 @@ in
 
     mainModelUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
+      default = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/main/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf";
       example = "https://huggingface.co/example/gemma-4-26B-A4B-it-Q4_K_M-GGUF/resolve/main/gemma-4-26b-a4b-it-q4_k_m.gguf";
       description = ''
         Direct download URL for mainModel. When set, a systemd oneshot service
@@ -399,7 +394,7 @@ in
 
     mainModelSha256 = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
+      default = "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891";
       description = ''
         Expected sha256 of mainModel. Verified after download, and re-checked
         against any file already at that path — a mismatch triggers a
@@ -410,14 +405,14 @@ in
 
     pulseModelUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
+      default = "https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/main/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf";
       example = "https://huggingface.co/example/gemma-4-E4B-it-Q4_K_M-GGUF/resolve/main/gemma-4-e4b-it-q4_k_m.gguf";
       description = "Direct download URL for pulseModel. Same mechanics as mainModelUrl.";
     };
 
     pulseModelSha256 = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
+      default = "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3";
       description = "Expected sha256 of pulseModel. Same mechanics as mainModelSha256.";
     };
 
@@ -425,6 +420,38 @@ in
       type = lib.types.int;
       default = 8;
       description = "Inference threads. Match physical cores, not hyperthreads.";
+    };
+
+    topP = lib.mkOption {
+      type = lib.types.float;
+      default = 0.95;
+      description = ''
+        Nucleus sampling threshold sent on every completion request, for both
+        mainModel and pulseModel. Google's published default for Gemma 4.
+      '';
+    };
+
+    topK = lib.mkOption {
+      type = lib.types.int;
+      default = 64;
+      description = ''
+        Top-k sampling cutoff sent on every completion request. Google's
+        published default for Gemma 4 — llama-server's own generic default
+        (40) predates and doesn't match it.
+      '';
+    };
+
+    stopSequences = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "\n\n---" "<end_of_turn>" ];
+      description = ''
+        Strings that end a completion early. `<end_of_turn>` is Gemma's real
+        raw-completion stop token (id 106): the harness talks to llama.cpp's
+        /completion endpoint directly, never /v1/chat/completions, so nothing
+        ever renders the chat template — but an IT-tuned model can still emit
+        its own end-of-turn token unprompted. "\n\n---" catches the model
+        starting a new markdown section instead of stopping.
+      '';
     };
 
     enableMtp = lib.mkOption {
@@ -732,6 +759,9 @@ in
       llm = {
         mainSocketPath = socketPathFor "main";
         pulseSocketPath = socketPathFor "pulse";
+        topP = cfg.topP;
+        topK = cfg.topK;
+        stop = cfg.stopSequences;
         # MTP only supports a single parallel slot (see the mainSlots override
         # below), so every tick type has to land on the one slot that exists.
         slots =
@@ -851,8 +881,6 @@ in
               fi
             ''}
 
-            ${waitForServer "main" (socketPathFor "main")}
-            ${waitForServer "pulse" (socketPathFor "pulse")}
           '';
 
           serviceConfig = {

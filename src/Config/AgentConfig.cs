@@ -53,6 +53,21 @@ public sealed class LlmConfig {
     public int MaxTokensReflect { get; set; } = 2400;
     public int MaxTokensReply { get; set; } = 500;
     public int MaxTokensChore { get; set; } = 400;
+
+    /// <summary>Nucleus sampling threshold. Google's published default for Gemma 4.</summary>
+    public double TopP { get; set; } = 0.95;
+
+    /// <summary>Top-k cutoff. Google's published default for Gemma 4 — llama-server's own generic default (40) predates and doesn't match it.</summary>
+    public int TopK { get; set; } = 64;
+
+    /// <summary>
+    /// Strings that end a completion early. `&lt;end_of_turn&gt;` is Gemma's real raw-completion
+    /// stop token (id 106): the harness talks to llama.cpp's /completion endpoint directly,
+    /// never /v1/chat/completions, so nothing ever renders the chat template, but an IT-tuned
+    /// model can still emit its own end-of-turn token unprompted. "\n\n---" catches the model
+    /// starting a new markdown section instead of stopping.
+    /// </summary>
+    public List<string> Stop { get; set; } = new() { "\n\n---", "<end_of_turn>" };
 }
 
 public sealed class ScheduleConfig {

@@ -35,8 +35,8 @@ foreach (var m in report.Malformed) Console.Error.WriteLine($"[index] malformed:
 if (args.Contains("--rebuild-only")) return;
 
 var http = new HttpClient();
-using var mainLlm = new LlamaClient(cfg.Llm.MainSocketPath);
-using var pulseLlm = new LlamaClient(cfg.Llm.PulseSocketPath);
+using var mainLlm = new LlamaClient(cfg.Llm.MainSocketPath, cfg.Llm.TopP, cfg.Llm.TopK, cfg.Llm.Stop);
+using var pulseLlm = new LlamaClient(cfg.Llm.PulseSocketPath, cfg.Llm.TopP, cfg.Llm.TopK, cfg.Llm.Stop);
 
 ContextBuilder context = new (tree, db);
 GoalStore goals = new (tree, db, cfg.Goals);
@@ -83,6 +83,17 @@ channel.MessageReceived += async content => {
 await channel.StartAsync(cts.Token);
 
 Console.WriteLine($"[harness] running. tree={cfg.TreeRoot} tz={cfg.OperatorTimeZone}");
+
+// Waited for here, not in the Nix unit's preStart: the process is already
+// "started" as far as systemd is concerned (Discord's even connected), so a
+// slow CPU model load no longer has any startup timeout to race against.
+// This only exists to keep the first post-boot ticks from being a foregone
+// SocketException — see WaitForHealthyAsync.
+await Task.WhenAll(
+    mainLlm.WaitForHealthyAsync("llama-main", cts.Token),
+    pulseLlm.WaitForHealthyAsync("llama-pulse", cts.Token));
+Console.WriteLine("[harness] llm servers ready.");
+
 await scheduler.RunAsync(cts.Token);
 
 if (channel is IAsyncDisposable disposableChannel)
