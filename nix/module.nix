@@ -65,7 +65,7 @@ let
           "--threads" (toString cfg.threads)
           "--ctx-size" (toString ctxSize)
           "--parallel" (toString parallel)
-          "--mlock"
+          "--load-mode" "mlock"   # --mlock is deprecated (still works, but this is the current flag)
         ] ++ lib.optionals quantKv [
           # Roughly halves KV cache memory at negligible quality cost. On CPU,
           # every extra bit per parameter is more RAM bandwidth per token.
