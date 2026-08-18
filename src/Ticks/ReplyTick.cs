@@ -39,8 +39,12 @@ public sealed class ReplyTick : ITick {
 
         var p = _ctx.BeginStable(Seeds.ReplySystem);
         _ctx.AddRecentEpisodes(p, 6, 500);
-        _ctx.AddText(p, "## He said\n\n" +
-            string.Join("\n\n", pending.Select(m => m.Content)) + "\n", 2000);
+        // pending's own content already appears here too, at the tail — this
+        // is the actual back-and-forth, not just what's new, so a reply
+        // several messages into a conversation isn't built as if it were the
+        // opening line.
+        var conversation = _db.RecentConversation(_channelCfg.ConversationGapMinutes);
+        _ctx.AddConversation(p, conversation, 3000);
 
         var r = await _llm.CompleteJsonAsync<ReplyResult>(
             p.Build("""

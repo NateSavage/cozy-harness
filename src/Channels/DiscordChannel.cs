@@ -38,8 +38,12 @@ namespace CozyHarness.Channels;
 /// gets its own one-off notice with Interrupt/Let it finish buttons — a reply
 /// comes either way, so "let it finish" is just acknowledging that, not a real
 /// choice with a different outcome. The two presence writers (this one and the
-/// reply-in-flight one in ProcessInboxAsync) don't coordinate; if both fire in
-/// the same window the presence just flickers, which costs nothing.
+/// reply-in-flight one in ProcessInboxAsync) don't coordinate while a reply is
+/// actually in flight, so the two can still flicker against each other in that
+/// window — harmless. But both funnel their cleanup through the same
+/// SyncActivityAsync, so a reply finishing always leaves the line showing
+/// whatever's actually still true, rather than the last of the two writers to
+/// happen to land.
 /// </summary>
 public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private const int MaxMessageLength = 2000;   // Discord's hard limit per message
@@ -67,6 +71,10 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private IDMChannel? _dmChannel;   // resolved once in StartAsync; every send/read after that reuses it
     private ulong? _lastInboundMessageId;
     private Task? _inboxWorker;
+    // Read by SyncStatusAsync (whenever it recomputes, including after a
+    // reconnect), written by SetAwayAsync — a gateway drop-and-resume during
+    // quiet hours must not silently flip the bot back to looking awake.
+    private volatile bool _away;
 
     public event Func<string, Task>? MessageReceived;
 
@@ -99,7 +107,25 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         _client.Log += OnLog;
         _client.MessageReceived += OnGatewayMessageAsync;
         _client.ButtonExecuted += OnButtonExecutedAsync;
+        _client.Ready += OnReadyRestorePresence;
         _activity.Changed += OnActivityChanged;
+    }
+
+    /// <summary>
+    /// Discord's gateway treats an IDENTIFY with no presence as offline — being
+    /// connected and answering gateway events isn't enough on its own, nothing
+    /// shows online until something explicitly says so. Permanent subscription
+    /// (unlike StartAsync's one-shot ready-wait handler below) so this re-fires
+    /// after a reconnect too, not just the first connect — restoring whatever
+    /// SyncStatusAsync currently reflects rather than hardcoding online, so a
+    /// gateway resume during quiet hours or an important tick doesn't undo it.
+    /// Fire-and-forget, same as OnActivityChanged: awaiting a gateway call
+    /// inline from inside a Ready handler blocks the gateway's own processing
+    /// task.
+    /// </summary>
+    private Task OnReadyRestorePresence() {
+        _ = Task.Run(SyncStatusAsync);
+        return Task.CompletedTask;
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -224,7 +250,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
                 finally
                 {
                     typing?.Dispose();
-                    try { await _client.SetGameAsync(null); } catch { /* best-effort */ }
+                    // Not a bare SetGameAsync(null): a heavy tick that started
+                    // before this reply and is still running after it must
+                    // keep showing, not go blank until that tick happens to
+                    // end on its own.
+                    await SyncActivityAsync();
                 }
             }
         }
@@ -283,18 +313,54 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         catch (Exception ex) { Console.Error.WriteLine($"[discord] button handling failed: {ex}"); }
     }
 
-    /// <summary>Reflects AgentActivity in the bot's presence for as long as a heavy tick runs — see class remarks on why replies use their own, separate presence text.</summary>
-    private void OnActivityChanged()
+    /// <summary>
+    /// Reflects AgentActivity in the bot's presence for as long as a heavy
+    /// tick runs — both the activity line and, since Important can flip
+    /// independently of quiet hours, the status too. See class remarks on why
+    /// replies use their own, separate activity text.
+    /// </summary>
+    private void OnActivityChanged() {
+        _ = Task.Run(SyncActivityAsync);
+        _ = Task.Run(SyncStatusAsync);
+    }
+
+    /// <summary>
+    /// Sets the activity line to whatever AgentActivity currently reflects —
+    /// null if nothing's running, the tick summary if something is. Shared by
+    /// OnActivityChanged and ProcessInboxAsync's reply cleanup: a reply
+    /// finishing must restore a heavy tick's status if one is still running
+    /// underneath it, not blank the line just because the reply itself is
+    /// done — see class remarks on why the two don't otherwise coordinate.
+    /// </summary>
+    private async Task SyncActivityAsync()
     {
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                if (_activity.CurrentTick is null) await _client.SetGameAsync(null);
-                else await _client.SetGameAsync(_activity.Summary(), type: ActivityType.Watching);
-            }
-            catch { /* best-effort */ }
-        });
+            if (_activity.CurrentTick is null) await _client.SetGameAsync(null);
+            else await _client.SetGameAsync(_activity.Summary(), type: ActivityType.Watching);
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>
+    /// The one place that decides the actual online/away/DND status, from
+    /// both of its inputs: AgentActivity.Important wins outright as Do Not
+    /// Disturb — being worth leaving alone matters more than the clock — and
+    /// otherwise it's away vs online per the last SetAwayAsync call (quiet
+    /// hours). Shared by SetAwayAsync, OnActivityChanged (Important can flip
+    /// independently of quiet hours), and OnReadyRestorePresence (a
+    /// reconnect must restore both inputs, not just one).
+    /// </summary>
+    private async Task SyncStatusAsync()
+    {
+        try
+        {
+            var status = _activity.Important ? UserStatus.DoNotDisturb
+                       : _away ? UserStatus.Idle
+                       : UserStatus.Online;
+            await _client.SetStatusAsync(status);
+        }
+        catch { /* best-effort */ }
     }
 
     public async Task SendAsync(string content, CancellationToken ct)
@@ -333,6 +399,12 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         var trace = ex.ToString();
         if (trace.Length > MaxErrorTraceLength) trace = trace[..MaxErrorTraceLength] + "\n[...truncated]";
         return SendAsync($"⚠️ **{context}**\n```\n{trace}\n```", ct);
+    }
+
+    public Task SetAwayAsync(bool away, CancellationToken ct)
+    {
+        _away = away;
+        return SyncStatusAsync();
     }
 
     private static Task OnLog(LogMessage msg)
@@ -404,6 +476,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         _client.Log -= OnLog;
         _client.MessageReceived -= OnGatewayMessageAsync;
         _client.ButtonExecuted -= OnButtonExecutedAsync;
+        _client.Ready -= OnReadyRestorePresence;
         _activity.Changed -= OnActivityChanged;
         _inbox.Writer.TryComplete();
 

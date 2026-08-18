@@ -85,7 +85,7 @@ ITick TickFactory(TickType tickType) => tickType switch {
 };
 
 AgentClock clock = new(cfg.Schedule, cfg.OperatorTimeZone);
-TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, db, runner, TickFactory, activity, errors);
+TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, db, runner, TickFactory, channel, activity, errors);
 
 using CancellationTokenSource cts = new();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

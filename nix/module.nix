@@ -750,6 +750,19 @@ in
         via settings directly (see the warning on that option).
       '';
     };
+
+    conversationGapMinutes = lib.mkOption {
+      type = lib.types.int;
+      default = 30;
+      description = ''
+        How long a silence has to run before the next Discord message counts
+        as a new conversation rather than a continuation. ReplyTick shows the
+        model the whole back-and-forth back to the start of the current
+        conversation by this measure — too long and an old, unrelated
+        exchange bleeds into a new one; too short and the model loses the
+        thread of a conversation with normal pauses in it.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -766,6 +779,7 @@ in
       enableGit = cfg.enableGit;
       mirrorRemote = if cfg.mirrorRepository == null then null else "mirror";
       channel.operatorUserId = cfg.operatorDiscordUserId;
+      channel.conversationGapMinutes = cfg.conversationGapMinutes;
       llm = {
         mainSocketPath = socketPathFor "main";
         pulseSocketPath = socketPathFor "pulse";

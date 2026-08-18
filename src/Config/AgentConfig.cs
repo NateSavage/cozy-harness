@@ -98,6 +98,12 @@ public sealed class ChannelConfig {
     public int SoftOutboundBudgetPerDay { get; set; } = 12;
     /// <summary>Operator asked to be told when a conversation is marked sensitive.</summary>
     public bool NotifyOperatorOnSensitive { get; set; } = true;
+    /// <summary>
+    /// How long a silence has to run before the next message counts as a new
+    /// conversation rather than a continuation. Governs how far back
+    /// ReplyTick's context reaches — see IndexDb.RecentConversation.
+    /// </summary>
+    public int ConversationGapMinutes { get; set; } = 30;
 }
 
 public sealed class GoalConfig {

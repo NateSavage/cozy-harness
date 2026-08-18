@@ -46,6 +46,7 @@ public sealed class WorkTick : ITick {
             return TickOutcome.Nothing($"goal {candidates[0].Id} is in the index but not on disk");
 
         _activity.SetDetail($"working on \"{goal.Title}\"");
+        _activity.MarkImportant();
 
         var budgetLeft = 5000;
         var p = _ctx.BeginStable(Seeds.WorkSystem);

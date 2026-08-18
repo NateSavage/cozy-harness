@@ -244,6 +244,41 @@ public sealed class IndexDb : IDisposable
         return list;
     }
 
+    /// <summary>
+    /// The messages that make up "the current conversation": scans back from
+    /// the most recent message (either direction, handled or not — a reply
+    /// tick marks its inputs handled immediately, so restricting to unhandled
+    /// would mean every reply after the first sees none of what came before
+    /// it) and stops at the first gap longer than gapMinutes. Everything
+    /// before that gap is a different conversation and is left out. Returned
+    /// oldest-first, ready to render as a transcript.
+    /// </summary>
+    public List<(string Direction, string Content, string Ts)> RecentConversation(int gapMinutes, int scanLimit = 40)
+    {
+        var rows = new List<(string Direction, string Content, string Ts)>();
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = "SELECT direction, content, ts FROM messages ORDER BY ts DESC LIMIT $l";
+            c.Parameters.AddWithValue("$l", scanLimit);
+            using var r = c.ExecuteReader();
+            while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2)));
+        }
+
+        var gap = TimeSpan.FromMinutes(gapMinutes);
+        var conversation = new List<(string Direction, string Content, string Ts)>();
+        DateTimeOffset? previous = null;
+        foreach (var row in rows)   // newest first
+        {
+            if (!DateTimeOffset.TryParse(row.Ts, out var ts)) continue;
+            if (previous is { } prev && prev - ts > gap) break;
+            conversation.Add(row);
+            previous = ts;
+        }
+
+        conversation.Reverse();   // oldest first
+        return conversation;
+    }
+
     public List<(long Id, string Source, string Content)> UnconsumedObservations(int limit = 40)
     {
         var list = new List<(long, string, string)>();

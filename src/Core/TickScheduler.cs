@@ -1,3 +1,4 @@
+using CozyHarness.Channels;
 using CozyHarness.Config;
 using CozyHarness.Domain;
 using CozyHarness.Storage;
@@ -24,6 +25,7 @@ public sealed class TickScheduler {
     private readonly IndexDb _db;
     private readonly TickRunner _runner;
     private readonly Func<TickType, ITick> _factory;
+    private readonly IOperatorChannel _channel;
     private readonly Random _rng = new();
 
     private readonly AgentActivity _activity;
@@ -31,18 +33,23 @@ public sealed class TickScheduler {
     private DateOnly _lastDailyReflect = DateOnly.MinValue;
     private DateOnly _lastWeeklyReflect = DateOnly.MinValue;
     private DateTimeOffset _lastIntake = DateTimeOffset.MinValue;
+    private bool? _lastQuietHours;   // null so the very first cycle always syncs presence, whichever way it starts
 
     private readonly ErrorReporter _errors;
 
     public TickScheduler(AgentClock clock, ScheduleConfig cfg, ChoreConfig choreCfg, IndexDb db,
-                          TickRunner runner, Func<TickType, ITick> factory, AgentActivity activity, ErrorReporter errors) {
+                          TickRunner runner, Func<TickType, ITick> factory, IOperatorChannel channel,
+                          AgentActivity activity, ErrorReporter errors) {
         _clock = clock; _cfg = cfg; _choreCfg = choreCfg; _db = db; _runner = runner; _factory = factory;
-        _activity = activity; _errors = errors;
+        _channel = channel; _activity = activity; _errors = errors;
     }
 
     public async Task RunAsync(CancellationToken ct) {
         while (!ct.IsCancellationRequested) {
-            try { await OneCycleAsync(ct); }
+            try {
+                await UpdatePresenceAsync(ct);
+                await OneCycleAsync(ct);
+            }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) {
                 // Anything that escapes a full cycle is infrastructure, not tick
@@ -62,6 +69,23 @@ public sealed class TickScheduler {
             try { await Task.Delay(NextInterval(), ct); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>
+    /// Presence follows the clock (see AgentClock.IsQuietHours), not
+    /// AgentActivity — being between ticks isn't the same thing as it being
+    /// quiet hours. Only calls out to the channel on an actual transition,
+    /// not every cycle. Its own try/catch, separate from RunAsync's, so a
+    /// presence hiccup here is never mistaken for a real scheduler-cycle
+    /// failure.
+    /// </summary>
+    private async Task UpdatePresenceAsync(CancellationToken ct) {
+        var quiet = _clock.IsQuietHours();
+        if (_lastQuietHours == quiet) return;
+        _lastQuietHours = quiet;
+        try { await _channel.SetAwayAsync(quiet, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch { /* best-effort; a presence hiccup shouldn't take the scheduler down */ }
     }
 
     private async Task OneCycleAsync(CancellationToken ct) {

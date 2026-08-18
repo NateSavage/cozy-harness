@@ -67,4 +67,9 @@ public sealed class ConsoleChannel : IOperatorChannel {
         Console.Error.WriteLine($"[error] {context}: {ex}");
         return Task.CompletedTask;
     }
+
+    public Task SetAwayAsync(bool away, CancellationToken ct) {
+        Console.WriteLine(away ? "[presence] away (quiet hours)" : "[presence] online");
+        return Task.CompletedTask;
+    }
 }

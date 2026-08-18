@@ -58,6 +58,27 @@ public sealed class ContextBuilder {
         p.AddVariable(s.ToString(), budget);
     }
 
+    /// <summary>
+    /// Renders the actual back-and-forth — both directions, in order — rather
+    /// than just whatever's newest. A reply built from only the latest inbound
+    /// message has no memory of the three exchanges immediately before it in
+    /// the same conversation; this is what fixes that. See
+    /// IndexDb.RecentConversation for how the conversation boundary itself
+    /// (as opposed to what's rendered once you have it) gets decided.
+    /// </summary>
+    public void AddConversation(PromptParts p, IEnumerable<(string Direction, string Content, string Ts)> messages, int budget) {
+        var list = messages.ToList();
+        if (list.Count == 0) return;
+
+        var s = new StringBuilder("## Our conversation\n\n");
+        foreach (var (direction, content, ts) in list) {
+            var when = DateTimeOffset.TryParse(ts, out var d) ? Ago(d) : ts;
+            var speaker = direction == "out" ? "me" : "him";
+            s.Append($"**{speaker}** ({when}): {content.Trim()}\n\n");
+        }
+        p.AddVariable(s.ToString(), budget);
+    }
+
     /// <summary>Full text of the most recent episodes for a goal — summaries lose too much for work ticks.</summary>
     public void AddEpisodeBodies(PromptParts p, string goalId, int count, int budget) {
         var eps = _db.RecentEpisodes(count, goalId);

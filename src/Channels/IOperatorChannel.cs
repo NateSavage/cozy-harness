@@ -8,6 +8,15 @@ public interface IOperatorChannel {
     Task SendAsync(string content, CancellationToken ct);
 
     /// <summary>
+    /// The away/online half of presence, driven by the clock — separate from
+    /// AgentActivity.Important, which can override this as Do Not Disturb
+    /// regardless of quiet hours (see DiscordChannel.SyncStatusAsync for how
+    /// the two combine). Driven by AgentClock.IsQuietHours() via
+    /// TickScheduler.
+    /// </summary>
+    Task SetAwayAsync(bool away, CancellationToken ct);
+
+    /// <summary>
     /// The operator asked to be told when a conversation is marked sensitive.
     /// they are told THAT it happened, not made to read it — the notice is the point.
     /// </summary>

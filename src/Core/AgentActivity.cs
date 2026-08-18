@@ -20,6 +20,8 @@ public sealed class AgentActivity {
     public TickType? CurrentTick { get; private set; }
     public string? Detail { get; private set; }
     public DateTimeOffset? StartedAt { get; private set; }
+    /// <summary>Worth being left alone for — reflected as Do Not Disturb rather than the usual online/away. See MarkImportant.</summary>
+    public bool Important { get; private set; }
 
     /// <summary>Fired after Begin/SetDetail/End, off any lock, so a channel can refresh a status display.</summary>
     public event Action? Changed;
@@ -35,6 +37,7 @@ public sealed class AgentActivity {
             _cts = cts = CancellationTokenSource.CreateLinkedTokenSource(outer);
             CurrentTick = type;
             Detail = null;
+            Important = false;
             StartedAt = DateTimeOffset.UtcNow;
         }
         Changed?.Invoke();
@@ -50,12 +53,28 @@ public sealed class AgentActivity {
         Changed?.Invoke();
     }
 
+    /// <summary>
+    /// Called by a tick that's worth being left alone for. Currently: any
+    /// WorkTick, unconditionally — a chore explicitly isn't this (see
+    /// Seeds.ChoreSystem: "nothing here that needs to matter"), and goals are
+    /// the agent's own self-directed pursuits in a way chores aren't. Reset
+    /// automatically at End(), same as Detail.
+    /// </summary>
+    public void MarkImportant() {
+        lock (_lock) {
+            if (CurrentTick is null) return;
+            Important = true;
+        }
+        Changed?.Invoke();
+    }
+
     internal void End() {
         lock (_lock) {
             _cts?.Dispose();
             _cts = null;
             CurrentTick = null;
             Detail = null;
+            Important = false;
             StartedAt = null;
         }
         Changed?.Invoke();
