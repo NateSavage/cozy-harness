@@ -22,9 +22,8 @@ let
   socketPathFor = name: "${socketDir}/llama-${name}.sock";
 
   # Shared with the download-progress notifier below and the Discord-config
-  # assertion at the bottom of this file, so there's exactly one place that
-  # knows how to dig this out of the freeform settings blob.
-  operatorUserId = (cfg.settings.channel or { }).operatorUserId or 0;
+  # assertion at the bottom of this file.
+  operatorUserId = cfg.operatorDiscordUserId;
 
   waitForServer = name: socketPath: pkgs.writeShellScript "wait-llama-${name}" ''
     # CPU inference with --mlock takes a while to become ready. The harness
@@ -69,7 +68,13 @@ let
           # every extra bit per parameter is more RAM bandwidth per token.
           "--cache-type-k" "q8_0"
           "--cache-type-v" "q8_0"
-        ] ++ lib.optionals mtp cfg.mtpFlags
+        ] ++ lib.optionals mtp ([
+          "--spec-type" "draft-mtp"
+          "--spec-draft-model" "${cfg.modelDirectory}/${cfg.mtpDraftModel}"
+          "--spec-draft-n-max" (toString cfg.mtpDraftNMax)
+        ] ++ lib.optionals (cfg.mtpDraftNMin != 0) [
+          "--spec-draft-n-min" (toString cfg.mtpDraftNMin)
+        ] ++ cfg.mtpFlags)
           ++ extraFlags);
 
         Slice = "agent.slice";
@@ -107,7 +112,7 @@ let
     };
   };
 
-  mkModelDownloadService = { name, url, sha256, dest }:
+  mkModelDownloadService = { name, url, sha256, dest, gates ? [ "llama-${name}.service" ] }:
     let
       shaArg = if sha256 == null then "" else sha256;
 
@@ -203,7 +208,7 @@ let
           # a brief dip in reported progress after a network blip is real,
           # not a bug here.)
           while kill -0 "$curl_pid" 2>/dev/null; do
-            sleep 300
+            sleep 2
             kill -0 "$curl_pid" 2>/dev/null || break
             have="$(${pkgs.coreutils}/bin/stat -c%s "$tmp" 2>/dev/null || echo 0)"
             if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
@@ -225,20 +230,22 @@ let
           exit "$curl_status"
         fi
 
-        if [ -n "$sha256" ] && ! verify "$tmp"; then
-          echo "downloaded $url but it failed hash verification" >&2
-          ${lib.optionalString notifyProgress ''notify "${name} model downloaded but failed hash verification"''}
+        actual_sha256="$(${pkgs.coreutils}/bin/sha256sum "$tmp" | cut -d' ' -f1)"
+
+        if [ -n "$sha256" ] && [ "$actual_sha256" != "$sha256" ]; then
+          echo "downloaded $url but it failed hash verification (expected $sha256, got $actual_sha256)" >&2
+          ${lib.optionalString notifyProgress ''notify "${name} model downloaded but failed hash verification (expected $sha256, got $actual_sha256)"''}
           rm -f "$tmp"
           exit 1
         fi
 
         mv "$tmp" "$dest"
-        echo "downloaded $dest"
+        echo "downloaded $dest (sha256: $actual_sha256)"
         ${lib.optionalString notifyProgress ''
           if [ -n "$sha256" ]; then
-            notify "${name} model downloaded and verified"
+            notify "${name} model downloaded and verified (sha256: $actual_sha256)"
           else
-            notify "${name} model downloaded"
+            notify "${name} model downloaded (sha256: $actual_sha256)"
           fi
         ''}
       '';
@@ -247,9 +254,11 @@ let
         description = "Download the ${name} model for cozy-harness";
         # WantedBy/Before here (rather than touching mkLlamaService) means this
         # unit only exists — and only gets pulled in — when a URL is actually
-        # configured; llama-${name} starts exactly as before if it isn't.
-        requiredBy = [ "llama-${name}.service" ];
-        before = [ "llama-${name}.service" ];
+        # configured; the gated unit(s) start exactly as before if it isn't.
+        # gates defaults to the matching llama-${name}.service, but the MTP
+        # drafter has no service of its own — it gates llama-main.service instead.
+        requiredBy = gates;
+        before = gates;
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
 
@@ -422,23 +431,82 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Multi-token prediction (speculative decoding against the model's own draft head).
-         Reported at roughly 1.4-2.2x faster generation with no accuracy loss, 
-         which on CPU is the difference between a two-minute work tick and a one-minute one.
+        Multi-token prediction: speculative decoding against a small drafter model
+        that mainModel's own quant repo ships alongside it (a companion mtp-*.gguf,
+        distinct from mainModel itself — see mtpDraftModel, required alongside this).
+        Reported at roughly 1.4-2.2x faster generation with no accuracy loss, which
+        on CPU is the difference between a two-minute work tick and a one-minute one.
 
-        Requires MTP-enabled GGUFs and a llama.cpp build with MTP merged, and costs about 1GB of extra RAM per server.
+        This is the single toggle: turning it on also forces mainSlots to 1 and
+        collapses settings.llm.slots so every tick type lands on that one slot —
+        llama.cpp's MTP drafting only supports a single parallel slot
+        (n_parallel=1), and that's a consequence of flipping this switch, not a
+        second and third thing you need to keep in sync by hand. It does mean
+        tick types serialize onto one slot instead of the four-way parallelism
+        mainSlots normally buys; only turn this on if faster per-tick generation
+        matters more than ticks overlapping.
 
-        DEFAULT OFF, and the flags below are the part of this module most likely
-        to be wrong: MTP flag names have been moving. Verify against
-        `llama-server --help` on your build before enabling, and use
-        mainExtraFlags directly if they differ.
+        DEFAULT OFF. --spec-* flag names have moved before (the --draft-max /
+        --draft-min flags this module used to hardcode no longer exist) and may
+        move again — verify against `llama-server --help` on your build.
+      '';
+    };
+
+    mtpDraftModel = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "mtp-gemma-4-26B-A4B-it.gguf";
+      description = ''
+        Filename (within modelDirectory) of the MTP drafter GGUF used for
+        speculative decoding against mainModel. This is a separate, much smaller
+        file than mainModel itself — typically shipped at the root of the same
+        quant repo as a companion `mtp-*.gguf`. Required when enableMtp is set.
+      '';
+    };
+
+    mtpDraftModelUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "https://huggingface.co/example/gemma-4-26B-A4B-it-qat-GGUF/resolve/main/mtp-gemma-4-26B-A4B-it.gguf";
+      description = "Direct download URL for mtpDraftModel. Same mechanics as mainModelUrl.";
+    };
+
+    mtpDraftModelSha256 = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Expected sha256 of mtpDraftModel. Same mechanics as mainModelSha256.";
+    };
+
+    mtpDraftNMax = lib.mkOption {
+      type = lib.types.int;
+      default = 3;
+      description = ''
+        Maximum draft tokens per step (--spec-draft-n-max). Model cards for MTP
+        drafters generally recommend 2-3; higher values see diminishing returns
+        as more of the draft gets rejected.
+      '';
+    };
+
+    mtpDraftNMin = lib.mkOption {
+      type = lib.types.int;
+      default = 0;
+      description = ''
+        Minimum draft tokens per step (--spec-draft-n-min). 0 (llama.cpp's own
+        default) omits the flag entirely rather than passing it explicitly.
       '';
     };
 
     mtpFlags = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ "--draft-max" "4" "--draft-min" "1" ];
-      description = "Flags appended when enableMtp is set. Verify against your llama.cpp build.";
+      default = [ ];
+      description = ''
+        Extra flags appended after the ones this module derives automatically
+        (--spec-type draft-mtp, --spec-draft-model, --spec-draft-n-max, and
+        --spec-draft-n-min when non-zero) — for rarely-needed knobs like
+        --spec-draft-p-min or --spec-draft-device. Verify against
+        `llama-server --help` on your build; the --spec-* surface has moved
+        before.
+      '';
     };
 
     mainExtraFlags = lib.mkOption {
@@ -473,7 +541,13 @@ in
     mainSlots = lib.mkOption {
       type = lib.types.int;
       default = 4;
-      description = "Parallel slots on the main server. One per tick type.";
+      description = ''
+        Parallel slots on the main server. One per tick type.
+
+        Forced to 1 whenever enableMtp is set — llama.cpp's MTP drafting only
+        supports a single parallel slot, so this value is overridden
+        internally rather than something you also need to set by hand.
+      '';
     };
 
     mirrorRepository = lib.mkOption {
@@ -586,7 +660,20 @@ in
     settings = lib.mkOption {
       type = jsonFormat.type;
       default = { };
-      description = "Contents of agent.json. Merged over the module's defaults.";
+      description = ''
+        Contents of agent.json. The module supplies its own settings via
+        mkDefault, computed from options like operatorDiscordUserId below —
+        prefer a typed option over reaching into this directly.
+
+        WARNING: despite the name, jsonFormat's type does NOT merge separate
+        definitions of this option key-by-key across priority tiers. Setting
+        so much as settings.foo.bar from a host config entirely discards the
+        module's own mkDefault contents (treeRoot, llm.*, everything) rather
+        than layering over it — confirmed directly against pkgs.formats.json.
+        If you need to inject something this module has no dedicated option
+        for yet, add one (see operatorDiscordUserId for the pattern) rather
+        than setting a path under settings from the outside.
+      '';
     };
 
     discordTokenFile = lib.mkOption {
@@ -598,18 +685,50 @@ in
         world-readable Nix store.
       '';
     };
+
+    operatorDiscordUserId = lib.mkOption {
+      type = lib.types.int;
+      default = 0;
+      description = ''
+        The operator's Discord user ID (a snowflake, never legitimately 0).
+        The harness DMs this user rather than posting to a channel. Woven
+        into settings.channel.operatorUserId internally — set it here, not
+        via settings directly (see the warning on that option).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    # NOTE: pkgs.formats.json's type does not merge across mkDefault/mkForce/
+    # normal priority tiers — a competing definition of `settings` (or any
+    # nested path under it) from a host config wins outright and silently
+    # discards everything in this block, rather than merging per-key
+    # (confirmed directly against pkgs.formats.json). So everything the
+    # module needs to inject — including anything sourced from another
+    # option, like operatorDiscordUserId here — has to be assembled into
+    # this single mkDefault value, not layered on from outside it.
     services.cozy-harness.settings = lib.mkDefault {
       treeRoot = treeDir;
       mirrorRemote = if cfg.mirrorRepository == null then null else "mirror";
+      channel.operatorUserId = cfg.operatorDiscordUserId;
       llm = {
         mainSocketPath = socketPathFor "main";
         pulseSocketPath = socketPathFor "pulse";
-        slots = { pulse = 0; work = 0; intake = 1; reflect = 2; reply = 3; chore = 0; };
+        # MTP only supports a single parallel slot (see the mainSlots override
+        # below), so every tick type has to land on the one slot that exists.
+        slots =
+          if cfg.enableMtp
+          then { pulse = 0; work = 0; intake = 0; reflect = 0; reply = 0; chore = 0; }
+          else { pulse = 0; work = 0; intake = 1; reflect = 2; reply = 3; chore = 0; };
       };
     };
+
+    # llama.cpp's MTP drafting only supports n_parallel=1. enableMtp is the
+    # toggle; this is a consequence of it, not a second thing to remember to
+    # set — mkForce wins over both mainSlots' own mkDefault and any plain
+    # `mainSlots = N;` a host sets (mkForce's priority 50 beats the default
+    # "normal" priority 100 those carry).
+    services.cozy-harness.mainSlots = lib.mkIf cfg.enableMtp (lib.mkForce 1);
 
     users.users.${cfg.user} = {
       isSystemUser = true;
@@ -663,6 +782,15 @@ in
         url = cfg.pulseModelUrl;
         sha256 = cfg.pulseModelSha256;
         dest = "${cfg.modelDirectory}/${cfg.pulseModel}";
+      }))
+      (lib.optionalAttrs (cfg.enableMtp && cfg.mtpDraftModelUrl != null) (mkModelDownloadService {
+        name = "mtp-draft";
+        url = cfg.mtpDraftModelUrl;
+        sha256 = cfg.mtpDraftModelSha256;
+        dest = "${cfg.modelDirectory}/${cfg.mtpDraftModel}";
+        # No llama-mtp-draft.service exists — llama-main loads this file itself
+        # via --spec-draft-model, so gate the unit that actually needs it.
+        gates = [ "llama-main.service" ];
       }))
       {
         cozy-harness = {
@@ -815,7 +943,11 @@ in
       ++ lib.optional (cfg.mainModelUrl != null && cfg.mainModelSha256 == null)
         "services.cozy-harness: mainModelUrl is set without mainModelSha256. The download is trusted on first sight and never re-checked — a truncated download or a swapped file upstream won't be caught."
       ++ lib.optional (cfg.pulseModelUrl != null && cfg.pulseModelSha256 == null)
-        "services.cozy-harness: pulseModelUrl is set without pulseModelSha256. The download is trusted on first sight and never re-checked — a truncated download or a swapped file upstream won't be caught.";
+        "services.cozy-harness: pulseModelUrl is set without pulseModelSha256. The download is trusted on first sight and never re-checked — a truncated download or a swapped file upstream won't be caught."
+      ++ lib.optional (cfg.enableMtp && cfg.mtpDraftModelUrl != null && cfg.mtpDraftModelSha256 == null)
+        "services.cozy-harness: mtpDraftModelUrl is set without mtpDraftModelSha256. The download is trusted on first sight and never re-checked — a truncated download or a swapped file upstream won't be caught."
+      ++ lib.optional cfg.enableMtp
+        "services.cozy-harness: enableMtp is on, which forces mainSlots to 1 and collapses settings.llm.slots onto that one slot (llama.cpp only supports n_parallel=1 for MTP drafting). Tick types serialize instead of overlapping across the usual four slots.";
 
     assertions = [
       {
@@ -839,6 +971,19 @@ in
         message = "services.cozy-harness: pulseModelSha256 is set but pulseModelUrl is not.";
       }
       {
+        assertion = cfg.mtpDraftModelSha256 == null || cfg.mtpDraftModelUrl != null;
+        message = "services.cozy-harness: mtpDraftModelSha256 is set but mtpDraftModelUrl is not.";
+      }
+      {
+        assertion = !cfg.enableMtp || cfg.mtpDraftModel != null;
+        message = ''
+          services.cozy-harness: enableMtp is set but mtpDraftModel is not. MTP
+          speculative decoding needs a drafter GGUF — the companion mtp-*.gguf
+          shipped alongside mainModel in its quant repo — in addition to
+          mainModel itself.
+        '';
+      }
+      {
         # The token itself only exists at runtime, via LoadCredential — this is
         # the one Discord-related thing eval actually can check. The harness
         # itself now refuses to start on this (a real snowflake is never 0),
@@ -847,10 +992,9 @@ in
         assertion = cfg.discordTokenFile == null || operatorUserId != 0;
         message = ''
           services.cozy-harness: discordTokenFile is set but
-          settings.channel.operatorUserId is unset (or 0). The bot talks to
-          the operator over DM now, not a configured channel — it will start,
-          connect, and have no one to DM, since a real Discord user ID is
-          never 0.
+          operatorDiscordUserId is unset (or 0). The bot talks to the operator
+          over DM now, not a configured channel — it will start, connect, and
+          have no one to DM, since a real Discord user ID is never 0.
         '';
       }
     ];
