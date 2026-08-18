@@ -71,11 +71,14 @@ public interface IOperatorChannel {
     Task ReplyToAsync(ulong userId, string content, CancellationToken ct);
 
     /// <summary>
-    /// The away/online half of presence, driven by the clock — separate from
-    /// AgentActivity.Important, which can override this as Do Not Disturb
-    /// regardless of quiet hours (see DiscordChannel.SyncStatusAsync for how
-    /// the two combine). Driven by AgentClock.IsQuietHours() via
-    /// TickScheduler.
+    /// The away/online half of presence — separate from AgentActivity.Important,
+    /// which can override this as Do Not Disturb regardless of quiet hours
+    /// (see DiscordChannel.SyncStatusAsync for how the two combine). The
+    /// `away` passed in is already the fully-decided value, not raw quiet
+    /// hours: TickScheduler.UpdatePresenceAsync folds in whether a DM
+    /// conversation is currently live (nothing within
+    /// ChannelConfig.ConversationGapMinutes counts as quiet, even at 3am) —
+    /// this method itself doesn't need to know why.
     /// </summary>
     Task SetAwayAsync(bool away, CancellationToken ct);
 

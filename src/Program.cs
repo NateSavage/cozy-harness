@@ -93,7 +93,7 @@ ITick ReplyFactory(ulong replyToUserId) =>
     new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel, replyToUserId);
 
 AgentClock clock = new(cfg.Schedule, cfg.OperatorTimeZone);
-TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, db, runner, TickFactory, ReplyFactory, channel, activity, errors);
+TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, cfg.Channel, db, runner, TickFactory, ReplyFactory, channel, activity, errors);
 
 using CancellationTokenSource cts = new();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

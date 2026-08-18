@@ -259,6 +259,22 @@ public sealed class IndexDb : IDisposable
         return Convert.ToInt32(c.ExecuteScalar());
     }
 
+    /// <summary>
+    /// When the most recent inbound message arrived, from anyone — null if
+    /// there's never been one. Deliberately not scoped to a single contact,
+    /// unlike PendingInbound/RecentConversation below: Discord presence is
+    /// one status for the whole bot, not per-DM, so "is there a live
+    /// conversation happening" has to be answered globally. See
+    /// TickScheduler.UpdatePresenceAsync.
+    /// </summary>
+    public DateTimeOffset? LastInboundAt()
+    {
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT ts FROM messages WHERE direction='in' ORDER BY ts DESC LIMIT 1";
+        var result = c.ExecuteScalar();
+        return result is string s && DateTimeOffset.TryParse(s, out var d) ? d : null;
+    }
+
     /// <summary>contactId scopes this to one sender's unhandled messages — see AddMessage.</summary>
     public List<(long Id, string Content)> PendingInbound(string contactId, int limit = 5)
     {

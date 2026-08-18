@@ -22,6 +22,7 @@ public sealed class TickScheduler {
     private readonly AgentClock _clock;
     private readonly ScheduleConfig _cfg;
     private readonly ChoreConfig _choreCfg;
+    private readonly ChannelConfig _channelCfg;
     private readonly IndexDb _db;
     private readonly TickRunner _runner;
     private readonly Func<TickType, ITick> _factory;
@@ -34,14 +35,14 @@ public sealed class TickScheduler {
     private DateOnly _lastDailyReflect = DateOnly.MinValue;
     private DateOnly _lastWeeklyReflect = DateOnly.MinValue;
     private DateTimeOffset _lastIntake = DateTimeOffset.MinValue;
-    private bool? _lastQuietHours;   // null so the very first cycle always syncs presence, whichever way it starts
+    private bool? _lastAway;   // null so the very first cycle always syncs presence, whichever way it starts
 
     private readonly ErrorReporter _errors;
 
-    public TickScheduler(AgentClock clock, ScheduleConfig cfg, ChoreConfig choreCfg, IndexDb db,
+    public TickScheduler(AgentClock clock, ScheduleConfig cfg, ChoreConfig choreCfg, ChannelConfig channelCfg, IndexDb db,
                           TickRunner runner, Func<TickType, ITick> factory, Func<ulong, ITick> replyFactory,
                           IOperatorChannel channel, AgentActivity activity, ErrorReporter errors) {
-        _clock = clock; _cfg = cfg; _choreCfg = choreCfg; _db = db; _runner = runner; _factory = factory;
+        _clock = clock; _cfg = cfg; _choreCfg = choreCfg; _channelCfg = channelCfg; _db = db; _runner = runner; _factory = factory;
         _replyFactory = replyFactory; _channel = channel; _activity = activity; _errors = errors;
     }
 
@@ -73,18 +74,31 @@ public sealed class TickScheduler {
     }
 
     /// <summary>
-    /// Presence follows the clock (see AgentClock.IsQuietHours), not
-    /// AgentActivity — being between ticks isn't the same thing as it being
-    /// quiet hours. Only calls out to the channel on an actual transition,
-    /// not every cycle. Its own try/catch, separate from RunAsync's, so a
-    /// presence hiccup here is never mistaken for a real scheduler-cycle
-    /// failure.
+    /// Presence follows the clock (see AgentClock.IsQuietHours) — but a live
+    /// DM conversation overrides it: away only if it's quiet hours AND
+    /// nothing has come in within ConversationGapMinutes. Not AgentActivity —
+    /// being between ticks isn't the same thing as it being quiet hours.
+    /// Only calls out to the channel on an actual transition, not every
+    /// cycle. Its own try/catch, separate from RunAsync's, so a presence
+    /// hiccup here is never mistaken for a real scheduler-cycle failure.
+    ///
+    /// Called from two places: RunAsync's own loop (which is what notices
+    /// the conversation window has lapsed and it's time to go back to away —
+    /// nothing else fires purely from silence) and HandleInboundAsync (so
+    /// coming online happens the moment a DM is handled, not up to
+    /// NextInterval later — during quiet hours that's up to
+    /// QuietPulseIntervalSeconds, long enough that a 2am reply could go out
+    /// while presence still says away).
     /// </summary>
     private async Task UpdatePresenceAsync(CancellationToken ct) {
-        var quiet = _clock.IsQuietHours();
-        if (_lastQuietHours == quiet) return;
-        _lastQuietHours = quiet;
-        try { await _channel.SetAwayAsync(quiet, ct); }
+        var lastInbound = _db.LastInboundAt();
+        var inConversation = lastInbound is not null
+            && (_clock.UtcNow - lastInbound.Value) < TimeSpan.FromMinutes(_channelCfg.ConversationGapMinutes);
+        var away = _clock.IsQuietHours() && !inConversation;
+
+        if (_lastAway == away) return;
+        _lastAway = away;
+        try { await _channel.SetAwayAsync(away, ct); }
         catch (OperationCanceledException) { throw; }
         catch { /* best-effort; a presence hiccup shouldn't take the scheduler down */ }
     }
@@ -139,6 +153,12 @@ public sealed class TickScheduler {
     /// them; see Program.cs's ReplyFactory.
     /// </summary>
     public async Task HandleInboundAsync(ulong userId, CancellationToken ct) {
+        // Come online immediately, not whenever RunAsync's loop next gets to
+        // it — see UpdatePresenceAsync. The message that triggered this call
+        // is already in the DB (Program.cs writes it before calling here),
+        // so LastInboundAt already reflects it.
+        await UpdatePresenceAsync(ct);
+
         // Deliberately does NOT take the heavy lock: a reply should never wait
         // behind a work tick, and it isn't a work tick itself.
         await _runner.RunAsync(_replyFactory(userId), ct);
