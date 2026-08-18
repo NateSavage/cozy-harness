@@ -1,0 +1,45 @@
+{
+  "treeRoot": "/home/agent/tree",
+  "mirrorRemote": null,
+  "operatorTimeZone": "Europe/London",
+  "llm": {
+    "mainSocketPath": "/run/cozy-harness/llama-main.sock",
+    "pulseSocketPath": "/run/cozy-harness/llama-pulse.sock",
+    "slots": {
+      "pulse": 0,
+      "work": 0,
+      "intake": 1,
+      "reflect": 2,
+      "reply": 3,
+      "chore": 0
+    }
+  },
+  "schedule": {
+    "pulseIntervalSeconds": 120,
+    "pulseJitter": 0.2,
+    "quietPulseIntervalSeconds": 900,
+    "quietHourStart": 23,
+    "quietHourEnd": 7,
+    "maxWorkTicksPerDay": 20
+  },
+  "channel": {
+    "operatorName": "operator",
+    "discordToken": null,
+    "operatorUserId": 0,
+    "softOutboundBudgetPerDay": 12,
+    "notifyOperatorOnSensitive": true
+  },
+  "goals": {
+    "defaultRenewDays": 21,
+    "longitudinalRenewDays": 90,
+    "minUselessGoals": 1
+  },
+  "feeds": {
+    "gitHubUser": null,
+    "watchedDirectory": "/agent/observations/dropbox"
+  },
+  "chores": {
+    "maxChoresPerDay": 8,
+    "minIntervalHours": 1
+  }
+}

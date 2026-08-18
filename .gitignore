@@ -1,0 +1,21 @@
+# .NET build output
+bin/
+obj/
+
+# Nix build result symlink (nix build .#agent-harness)
+result
+result-*
+
+# JetBrains Rider / IntelliJ project files
+.idea/
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor backups/swap files
+*.swp
+*~
