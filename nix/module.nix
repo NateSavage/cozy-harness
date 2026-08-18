@@ -550,6 +550,21 @@ in
       '';
     };
 
+    enableGit = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether the harness versions its tree in git at all: repo init at
+        startup, one commit per tick, mirror push. The tree is still plain
+        files on disk either way — this only turns off the git history layered
+        on top of it (and with it, `git log` as the timeline/introspection
+        tool the design leans on — see mirrorRepository).
+
+        DEFAULT ON. Turning this off is meant as a temporary/testing knob, not
+        a steady-state choice.
+      '';
+    };
+
     mirrorRepository = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -562,6 +577,8 @@ in
         A local path is initialised automatically. A remote is strongly
         preferred — a mirror on the same disk protects against the agent, not
         against the disk.
+
+        No effect while enableGit is false.
       '';
     };
 
@@ -709,6 +726,7 @@ in
     # this single mkDefault value, not layered on from outside it.
     services.cozy-harness.settings = lib.mkDefault {
       treeRoot = treeDir;
+      enableGit = cfg.enableGit;
       mirrorRemote = if cfg.mirrorRepository == null then null else "mirror";
       channel.operatorUserId = cfg.operatorDiscordUserId;
       llm = {

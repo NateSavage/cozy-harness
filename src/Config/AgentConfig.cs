@@ -7,6 +7,13 @@ public sealed class AgentConfig {
     public string TreeRoot { get; set; } = "/agent";
     public string? MirrorRemote { get; set; } = "mirror";
 
+    /// <summary>
+    /// Off switch for GitStore: no init, no per-tick commit, no mirror push.
+    /// The tree is still plain files on disk either way — this only turns off
+    /// the git history layered on top of it.
+    /// </summary>
+    public bool EnableGit { get; set; } = true;
+
     public LlmConfig Llm { get; set; } = new();
     public ScheduleConfig Schedule { get; set; } = new();
     public ChannelConfig Channel { get; set; } = new();

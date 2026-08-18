@@ -21,7 +21,7 @@ var cfg = File.Exists(configPath)
 AgentTree tree = new(cfg.TreeRoot);
 tree.EnsureLayout();
 
-GitStore git = new(cfg.TreeRoot, cfg.MirrorRemote);
+GitStore git = new(cfg.TreeRoot, cfg.MirrorRemote, cfg.EnableGit);
 git.EnsureRepo();
 
 using IndexDb db = new(tree.Abs("index.sqlite"));

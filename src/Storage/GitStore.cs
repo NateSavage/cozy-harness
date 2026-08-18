@@ -13,13 +13,16 @@ namespace CozyHarness.Storage;
 public sealed class GitStore {
     private readonly string _root;
     private readonly string? _mirror;
+    private readonly bool _enabled;
 
-    public GitStore(string root, string? mirrorRemote) {
+    public GitStore(string root, string? mirrorRemote, bool enabled = true) {
         _root = root;
         _mirror = mirrorRemote;
+        _enabled = enabled;
     }
 
     public void EnsureRepo() {
+        if (!_enabled) return;
         if (Directory.Exists(Path.Combine(_root, ".git"))) return;
         Run("init");
         Run("config user.name agent");
@@ -28,8 +31,9 @@ public sealed class GitStore {
         Run("commit -m \"tree: initial layout\" --allow-empty");
     }
 
-    /// <summary>Commit everything changed by a tick. Returns the sha, or null if nothing changed.</summary>
+    /// <summary>Commit everything changed by a tick. Returns the sha, or null if nothing changed (including when git is disabled).</summary>
     public string? CommitTick(string tickType, string summary) {
+        if (!_enabled) return null;
         Run("add -A");
         // `git status` has no --cached flag (that's a `git diff` option) — this
         // used to always fail and read as "nothing changed", so nothing was ever
@@ -48,12 +52,12 @@ public sealed class GitStore {
     /// free with its own tree — which is the point.
     /// </summary>
     public void PushMirror() {
-        if (_mirror is null) return;
+        if (!_enabled || _mirror is null) return;
         try { Run($"push --quiet {_mirror} HEAD"); }
         catch (Exception) { /* mirror unreachable: never let this stop a tick */ }
     }
 
-    public string Log(string args) => Run($"log {args}");
+    public string Log(string args) => _enabled ? Run($"log {args}") : "";
 
     private static string Sanitize(string s) {
         s = s.Replace('\n', ' ').Replace('\r', ' ').Trim();
