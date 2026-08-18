@@ -100,7 +100,7 @@ public sealed class AgentActivity {
 
         var what = detail ?? type switch {
             TickType.Work          => "working on a goal",
-            TickType.Intake        => "reading the world",
+            TickType.Intake        => "reading",
             TickType.ReflectDaily  => "reflecting on the day",
             TickType.ReflectWeekly => "reflecting on the week",
             TickType.Chore         => "working through a chore",

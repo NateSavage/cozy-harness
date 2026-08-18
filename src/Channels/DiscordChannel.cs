@@ -44,7 +44,7 @@ namespace CozyHarness.Channels;
 /// next starts) without blocking the socket while it happens.
 ///
 /// Presence doubles as an ambient status: <see cref="OnActivityChanged"/> shows
-/// whatever AgentActivity reports ("working on ...", "reading the world", ...)
+/// whatever AgentActivity reports ("working on ...", "reading", ...)
 /// for as long as a heavy tick runs, and a message that arrives mid-tick also
 /// gets its own one-off notice with Interrupt/Let it finish buttons — a reply
 /// comes either way, so "let it finish" is just acknowledging that, not a real
@@ -426,7 +426,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
                     // same _settled gate (see its remarks): a message can
                     // arrive and reach here within 2s of a reconnect too.
                     await _settled.Task;
-                    await _client.SetGameAsync("a reply taking shape", type: ActivityType.Watching);
+                    await _client.SetGameAsync("yapping", type: ActivityType.Watching);
                 }
                 catch { /* best-effort; a presence hiccup shouldn't block the actual reply */ }
 
