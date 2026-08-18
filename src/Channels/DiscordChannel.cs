@@ -122,9 +122,22 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     /// Fire-and-forget, same as OnActivityChanged: awaiting a gateway call
     /// inline from inside a Ready handler blocks the gateway's own processing
     /// task.
+    ///
+    /// The delay before actually calling SetStatusAsync is load-bearing, not
+    /// decorative: sending a presence update too soon after Ready is a known
+    /// Discord.Net hazard (discord-net/Discord.Net#1701) — it can trigger
+    /// InvalidSession and put the client into a reconnect loop, which looks
+    /// exactly like "never comes online" from the outside since each fresh
+    /// Ready just repeats the same too-early call. Session's had a moment to
+    /// settle by 2s.
     /// </summary>
     private Task OnReadyRestorePresence() {
-        _ = Task.Run(SyncStatusAsync);
+        // SyncStatusAsync already catches and logs its own failures — nothing
+        // left here that needs its own try/catch.
+        _ = Task.Run(async () => {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            await SyncStatusAsync();
+        });
         return Task.CompletedTask;
     }
 
@@ -339,7 +352,11 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
             if (_activity.CurrentTick is null) await _client.SetGameAsync(null);
             else await _client.SetGameAsync(_activity.Summary(), type: ActivityType.Watching);
         }
-        catch { /* best-effort */ }
+        // Best-effort — a presence hiccup must never take anything else down
+        // — but silent until now. Logged, not swallowed, precisely because
+        // "nothing visibly broke, the activity line just never changed" is
+        // otherwise undiagnosable from the outside.
+        catch (Exception ex) { Console.Error.WriteLine($"[discord] activity sync failed: {ex.Message}"); }
     }
 
     /// <summary>
@@ -360,7 +377,10 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
                        : UserStatus.Online;
             await _client.SetStatusAsync(status);
         }
-        catch { /* best-effort */ }
+        // Same as SyncActivityAsync: best-effort, but logged. A status update
+        // that silently fails looks identical to "never called" from Discord
+        // — this is the only way to tell the two apart without reading code.
+        catch (Exception ex) { Console.Error.WriteLine($"[discord] status sync failed: {ex.Message}"); }
     }
 
     public async Task SendAsync(string content, CancellationToken ct)

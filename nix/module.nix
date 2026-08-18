@@ -619,6 +619,21 @@ in
       '';
     };
 
+    githubUser = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "octocat";
+      description = ''
+        GitHub username to poll for the intake tick — the operator's own,
+        for knowing him. Unauthenticated (public events API, no token needed);
+        fine at this polling cadence (twice daily by default) against
+        GitHub's 60-req/hour unauthenticated limit.
+
+        Null disables the feed entirely — no GitHubFeed is constructed, not
+        just an empty one.
+      '';
+    };
+
     limits = {
       totalMemoryMax = lib.mkOption {
         type = lib.types.str;
@@ -780,6 +795,7 @@ in
       mirrorRemote = if cfg.mirrorRepository == null then null else "mirror";
       channel.operatorUserId = cfg.operatorDiscordUserId;
       channel.conversationGapMinutes = cfg.conversationGapMinutes;
+      feeds.githubUser = cfg.githubUser;
       llm = {
         mainSocketPath = socketPathFor "main";
         pulseSocketPath = socketPathFor "pulse";
