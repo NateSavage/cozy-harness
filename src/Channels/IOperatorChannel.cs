@@ -33,6 +33,13 @@ public interface IOperatorChannel {
     /// discoverable from a permission error after the fact. `name` is the
     /// subcommand, not the top-level command.
     ///
+    /// A `name` containing a space (e.g. "debug context") becomes a
+    /// subcommand GROUP wrapping a subcommand — `/admin debug context` —
+    /// rather than one flat subcommand, since Discord doesn't allow spaces
+    /// in a single subcommand name. ConsoleChannel needs no special handling
+    /// for this: it matches the whole "/admin "-prefixed remainder as one
+    /// string either way.
+    ///
     /// Hard requirement, not an incidental property, and shared with
     /// RegisterWhitelistedCommandAsync below: a command invocation and its
     /// handler's response must never reach the model's context. Neither side

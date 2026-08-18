@@ -61,31 +61,8 @@ public sealed class ReplyTick : ITick {
         var pending = _db.PendingInbound(contactId, 5);
         if (pending.Count == 0) return TickOutcome.Nothing("no messages waiting");
 
-        var p = _ctx.BeginStable(Seeds.ReplySystem);
-        _ctx.AddRecentEpisodes(p, 6, 500);
-        // pending's own content already appears here too, at the tail — this
-        // is the actual back-and-forth, not just what's new, so a reply
-        // several messages into a conversation isn't built as if it were the
-        // opening line.
-        var conversation = _db.RecentConversation(contactId, _channelCfg.ConversationGapMinutes);
-        _ctx.AddConversation(p, conversation, displayName, 3000);
-
-        var r = await _llm.CompleteJsonAsync<ReplyResult>(
-            p.Build("""
-                Reply with JSON only:
-                {
-                  "reply": "<what you say back>",
-                  "summary": "<one line for the log>",
-                  "sensitive": true | false,
-                  "salience": 0.0-1.0,
-                  "they_want_to_be_called": "<name, only if they just asked you to call them something — otherwise null>"
-                }
-
-                Mark sensitive if this conversation touches something personal or
-                private. Your operator is told when that happens; he asked to be.
-                It is not hidden from anyone.
-                """),
-            _cfg.Slots["reply"], _cfg.MaxTokensReply, ct);
+        var prompt = BuildPrompt(contactId, displayName);
+        var r = await _llm.CompleteJsonAsync<ReplyResult>(prompt, _cfg.Slots["reply"], _cfg.MaxTokensReply, ct);
 
         // Real usage from the completion that just happened, not an estimate
         // — see LlamaClient._slotUsage. Checked here, before anything below
@@ -144,6 +121,54 @@ public sealed class ReplyTick : ITick {
             Sensitive = r.Sensitive,
             Salience = Math.Clamp(r.Salience ?? 0.5, 0, 1),
         };
+    }
+
+    /// <summary>
+    /// The exact prompt text for replying to contactId right now — same
+    /// stable-prefix-then-variable assembly RunAsync uses, factored out here
+    /// so there's exactly one place that builds it: RunAsync and
+    /// BuildPromptPreview both call this, so the preview can never quietly
+    /// drift from what a real reply actually sends.
+    /// </summary>
+    private string BuildPrompt(string contactId, string displayName) {
+        var p = _ctx.BeginStable(Seeds.ReplySystem);
+        _ctx.AddRecentEpisodes(p, 6, 500);
+        // The current conversation's own messages appear here too, at the
+        // tail — this is the actual back-and-forth, not just what's new, so
+        // a reply several messages in isn't built as if it were the opening
+        // line.
+        var conversation = _db.RecentConversation(contactId, _channelCfg.ConversationGapMinutes);
+        _ctx.AddConversation(p, conversation, displayName, 3000);
+
+        return p.Build("""
+            Reply with JSON only:
+            {
+              "reply": "<what you say back>",
+              "summary": "<one line for the log>",
+              "sensitive": true | false,
+              "salience": 0.0-1.0,
+              "they_want_to_be_called": "<name, only if they just asked you to call them something — otherwise null>"
+            }
+
+            Mark sensitive if this conversation touches something personal or
+            private. Your operator is told when that happens; he asked to be.
+            It is not hidden from anyone.
+            """);
+    }
+
+    /// <summary>
+    /// For /admin debug context — see Program.cs. Unlike RunAsync, this never
+    /// touches the LLM and never requires a pending inbound message: the
+    /// point isn't answering the newest thing, it's showing what the prompt
+    /// looks like right now, which is meaningful even between messages.
+    /// </summary>
+    public string BuildPromptPreview() {
+        var isOperator = _replyToUserId == _channelCfg.OperatorUserId;
+        var contactId = _replyToUserId.ToString();
+        var displayName = isOperator
+            ? _channelCfg.OperatorName
+            : _people.CurrentName(contactId, _channelCfg.DisplayNameFor(_replyToUserId));
+        return BuildPrompt(contactId, displayName);
     }
 
     private sealed class ReplyResult {

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using CozyHarness.Core;
@@ -283,11 +284,44 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
                 .WithDescription("Operator-only commands")
                 .WithContextTypes(dmContexts)
                 .WithIntegrationTypes(guildInstall);
-            foreach (var (name, (description, _)) in _adminCommands)
+
+            // A registered name containing a space — e.g. "debug context" —
+            // becomes a subcommand GROUP ("debug") wrapping a subcommand
+            // ("context"), since Discord doesn't allow spaces in a single
+            // subcommand name; "/admin debug context" is the only way to get
+            // that literal invocation. A flat name stays a direct subcommand
+            // of /admin, same as goals/chores. See OnSlashCommandExecutedAsync
+            // for the matching dispatch side.
+            foreach (var (name, (description, _)) in _adminCommands.Where(kv => !kv.Key.Contains(' ')))
                 admin.AddOption(new SlashCommandOptionBuilder()
                     .WithName(name)
                     .WithDescription(description)
                     .WithType(ApplicationCommandOptionType.SubCommand));
+
+            // Each group is fully built — every subcommand already attached
+            // via AddOption on the group itself — before admin.AddOption(group)
+            // runs. Discord.Net's own docs build nested groups in that order;
+            // nothing guarantees AddOption keeps mutating a builder that's
+            // already been handed to its parent.
+            var groups = _adminCommands.Keys
+                .Where(k => k.Contains(' '))
+                .Select(k => (Group: k.Split(' ', 2)[0], Sub: k.Split(' ', 2)[1], FullName: k))
+                .GroupBy(x => x.Group);
+
+            foreach (var g in groups)
+            {
+                var group = new SlashCommandOptionBuilder()
+                    .WithName(g.Key)
+                    .WithDescription($"{g.Key} commands")
+                    .WithType(ApplicationCommandOptionType.SubCommandGroup);
+                foreach (var entry in g)
+                    group.AddOption(new SlashCommandOptionBuilder()
+                        .WithName(entry.Sub)
+                        .WithDescription(_adminCommands[entry.FullName].Description)
+                        .WithType(ApplicationCommandOptionType.SubCommand));
+                admin.AddOption(group);
+            }
+
             toRegister.Add(admin.Build());
         }
 
@@ -523,8 +557,15 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
             // Which /admin subcommand was actually invoked — Discord nests it
             // as the (sole) option on the top-level "admin" interaction
-            // rather than giving it its own Data.Name.
-            var sub = command.Data.Options.FirstOrDefault()?.Name;
+            // rather than giving it its own Data.Name. A subcommand GROUP
+            // (e.g. "debug") nests one level deeper still: its own Options
+            // holds the (sole) actual subcommand invoked within it (e.g.
+            // "context") — see the registration loop in StartAsync for why a
+            // registered name with a space becomes a group this way.
+            var top = command.Data.Options.FirstOrDefault();
+            var nested = top?.Options?.FirstOrDefault();
+            var sub = nested is not null ? $"{top!.Name} {nested.Name}" : top?.Name;
+
             if (sub is null || !_adminCommands.TryGetValue(sub, out var adminEntry))
             {
                 await command.RespondAsync("Unknown command.", ephemeral: true);
@@ -559,7 +600,22 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         {
             var text = await handler(default);
             if (string.IsNullOrWhiteSpace(text)) text = "(nothing to show)";
-            if (text.Length > MaxMessageLength) text = text[..(MaxMessageLength - 20)] + "\n[...truncated]";
+
+            if (text.Length > MaxMessageLength)
+            {
+                // A file, not a truncated message — /admin debug context is
+                // the reason this exists: silently cutting it to 2000
+                // characters would defeat the entire point of a command
+                // whose job is showing the COMPLETE prompt. Applies to any
+                // admin/whitelisted command's output, not just that one, so
+                // nothing else has to remember to handle this itself.
+                using var stream = new MemoryStream(Encoding.UTF8.GetBytes(text));
+                var fileName = label.Trim('/').Replace(' ', '-') + ".txt";
+                await command.RespondWithFileAsync(stream, fileName,
+                    $"{label} ({text.Length:N0} characters — too long for a message)", ephemeral: true);
+                return;
+            }
+
             await command.RespondAsync(text, ephemeral: true);
         }
         catch (Exception ex)

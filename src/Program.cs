@@ -150,6 +150,20 @@ await channel.RegisterWhitelistedCommandAsync("context", "Show context window us
     return Task.FromResult(string.Join("\n", lines));
 });
 
+// "debug context", not "debug-context" or "context-dump": the space is
+// meaningful — DiscordChannel reads it as "nest this under a 'debug'
+// subcommand group" (Discord doesn't allow spaces in a single subcommand
+// name, so a literal `/admin debug context` invocation requires that
+// nesting). See IOperatorChannel.RegisterCommandAsync.
+await channel.RegisterCommandAsync("debug context", "Dump the exact prompt built for the operator's current conversation", ct => {
+    // Constructing the real ReplyTick (rather than reassembling the prompt
+    // by hand here) is what guarantees "exact" — same class, same fields,
+    // same BuildPrompt the real reply path calls, just via the preview
+    // method instead of RunAsync so nothing is sent and no LLM call happens.
+    var tick = new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel, cfg.Channel.OperatorUserId);
+    return Task.FromResult(tick.BuildPromptPreview());
+});
+
 await channel.RegisterCommandAsync("chores", "List active chores", ct => {
     var chores = db.ActiveChores();
     var text = chores.Count == 0
