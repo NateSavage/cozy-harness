@@ -126,27 +126,47 @@ await channel.RegisterCommandAsync("goals", "List active goals", ct => {
 // Whitelisted, not admin: anyone allowed to DM the agent at all is allowed
 // to check this — see IOperatorChannel.RegisterWhitelistedCommandAsync.
 await channel.RegisterWhitelistedCommandAsync("context", "Show context window usage per tick type", ct => {
-    // Grouped by (server, slot) rather than one line per tick type: several
-    // tick types deliberately share a slot (see LlmConfig.Slots — chore
-    // shares main's slot 0 with work always, and under MTP everything but
-    // pulse shares slot 0) and would otherwise print the same number twice
-    // with no indication they're not independent.
     var mainCapacity = cfg.Llm.MainContextSize / Math.Max(1, cfg.Llm.MainSlots);
-    var groups = cfg.Llm.Slots
-        .GroupBy(kv => (IsPulse: kv.Key == "pulse", kv.Value))
-        .OrderBy(g => g.Key.IsPulse).ThenBy(g => g.Key.Value);
+    var mainTicks = cfg.Llm.Slots.Where(kv => kv.Key != "pulse").ToList();
 
-    var lines = groups.Select(g => {
-        var (isPulse, slot) = g.Key;
-        var names = string.Join(", ", g.Select(kv => kv.Key).OrderBy(n => n));
-        var client = isPulse ? pulseLlm : mainLlm;
-        var capacity = isPulse ? cfg.Llm.PulseContextSize : mainCapacity;
-        var server = isPulse ? "pulse" : "main";
+    // Detected from the actual slot assignment, not a separate "is MTP on"
+    // flag — C# config has no such flag, only its effect (module.nix's
+    // enableMtp forces every main tick type onto llama.cpp's single required
+    // parallel slot). If every main tick type happens to land on the same
+    // slot, they share one window and should be shown as one, whatever
+    // caused that.
+    var collapsed = mainTicks.Select(kv => kv.Value).Distinct().Count() <= 1;
+
+    string Line(string label, LlamaClient client, int slot, int capacity) {
         var used = client.LastKnownUsage(slot);
         return used is null
-            ? $"**{names}** (slot {slot}, {server}) — no completions yet this run"
-            : $"**{names}** (slot {slot}, {server}) — {used}/{capacity} tokens ({used * 100 / capacity}%)";
-    });
+            ? $"**{label}** — no completions yet this run"
+            : $"**{label}** — {used}/{capacity} tokens ({used * 100 / capacity}%)";
+    }
+
+    var lines = new List<string> {
+        Line("pulse", pulseLlm, cfg.Llm.Slots["pulse"], cfg.Llm.PulseContextSize),
+    };
+
+    if (collapsed)
+    {
+        // The MTP case: one clearly-labeled line for the single shared
+        // window (mainCapacity is already the full context here, since
+        // MainSlots is forced to 1), not a jumbled comma-list that reads
+        // like just another grouped slot among several.
+        var names = string.Join(", ", mainTicks.Select(kv => kv.Key).OrderBy(n => n));
+        lines.Add(Line($"{names} — shared window (MTP)", mainLlm, mainTicks[0].Value, mainCapacity));
+    }
+    else
+    {
+        // One line per tick type, not grouped by physical slot: chore does
+        // still share slot 0 with work (see LlmConfig.Slots) and will show
+        // the same number, but each gets its own line instead of being
+        // merged behind one label.
+        foreach (var (tick, slot) in mainTicks.OrderBy(kv => kv.Key))
+            lines.Add(Line($"{tick} (slot {slot})", mainLlm, slot, mainCapacity));
+    }
+
     return Task.FromResult(string.Join("\n", lines));
 });
 
