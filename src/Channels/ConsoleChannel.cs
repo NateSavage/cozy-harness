@@ -15,7 +15,14 @@ public sealed class ConsoleChannel : IOperatorChannel {
 
     public ConsoleChannel(AgentActivity activity) => _activity = activity;
 
-    public event Func<string, Task>? MessageReceived;
+    public event Func<ulong, string, string, Task>? MessageReceived;
+
+    // Console has no real per-user identity — everything typed here is "the
+    // operator" as far as the rest of the harness is concerned, and there's
+    // no live display name to report (ConsoleUserId == OperatorUserId is the
+    // only case that matters, and that path never reads this name anyway).
+    private const ulong ConsoleUserId = 0;
+    private const string ConsoleUserName = "console";
 
     public Task StartAsync(CancellationToken ct) {
         _ = Task.Run(async () =>
@@ -40,7 +47,7 @@ public sealed class ConsoleChannel : IOperatorChannel {
                                        "(type /interrupt to stop it, or just wait)");
 
                 if (MessageReceived is not null) {
-                    try { await MessageReceived(line); }
+                    try { await MessageReceived(ConsoleUserId, ConsoleUserName, line); }
                     catch (Exception ex) { await NotifyErrorAsync("handling your message failed", ex, ct); }
                 }
             }
@@ -52,6 +59,8 @@ public sealed class ConsoleChannel : IOperatorChannel {
         Console.WriteLine($"\n[agent] {content}\n");
         return Task.CompletedTask;
     }
+
+    public Task ReplyToAsync(ulong userId, string content, CancellationToken ct) => SendAsync(content, ct);
 
     public Task NotifySensitiveAsync(DateTimeOffset when, CancellationToken ct) {
         Console.WriteLine($"[notice] a conversation at {when:HH:mm} was marked sensitive");

@@ -766,6 +766,41 @@ in
       '';
     };
 
+    allowedUsers = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          discordUserId = lib.mkOption {
+            type = lib.types.int;
+            description = "Their Discord user ID (a snowflake).";
+          };
+          name = lib.mkOption {
+            type = lib.types.str;
+            description = ''
+              Display label used for logging and conversation attribution.
+              Chosen here rather than pulled from their live Discord
+              username: it's used as a filesystem path segment
+              (people/<name>/...) and needs to stay stable regardless of
+              what they rename themselves to on Discord.
+            '';
+          };
+        };
+      });
+      default = [ ];
+      example = [ { discordUserId = 111111111111111111; name = "Alex"; } ];
+      description = ''
+        Additional people allowed to DM the bot, beyond the operator (who's
+        always implicitly allowed — no need to list them here too). A DM
+        from anyone else is ignored outright: not queued, not logged, does
+        not wake the agent.
+
+        Conversation history and message logging are scoped and attributed
+        to each person by name — but the reply prompt itself
+        (Seeds.ReplySystem) is still written as if talking to the operator;
+        a whitelisted sender is correctly named, not treated as a distinct
+        relationship with its own framing, yet.
+      '';
+    };
+
     conversationGapMinutes = lib.mkOption {
       type = lib.types.int;
       default = 30;
@@ -794,6 +829,10 @@ in
       enableGit = cfg.enableGit;
       mirrorRemote = if cfg.mirrorRepository == null then null else "mirror";
       channel.operatorUserId = cfg.operatorDiscordUserId;
+      # userId/name here match AllowedContact's C# property names
+      # (case-insensitive) — discordUserId/name above are just this
+      # module's own, more self-explanatory option names for the same thing.
+      channel.allowedUsers = map (u: { userId = u.discordUserId; name = u.name; }) cfg.allowedUsers;
       channel.conversationGapMinutes = cfg.conversationGapMinutes;
       feeds.githubUser = cfg.githubUser;
       llm = {

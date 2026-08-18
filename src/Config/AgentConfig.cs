@@ -94,6 +94,17 @@ public sealed class ChannelConfig {
     public string? DiscordToken { get; set; }
     /// <summary>The operator's Discord user ID — DiscordChannel talks to them over DM, not a configured channel. Guild chat is out of scope for now.</summary>
     public ulong OperatorUserId { get; set; }
+    /// <summary>
+    /// Additional people allowed to DM the bot, beyond the operator (who's
+    /// always implicitly allowed — no need to list them here too). A DM from
+    /// anyone else is ignored outright: not queued, not logged, does not
+    /// wake the agent. Conversation history (IndexDb.RecentConversation) and
+    /// message logging are scoped per sender — see DisplayNameFor — but the
+    /// reply prompt itself (Seeds.ReplySystem) is still written as if talking
+    /// to the operator; a whitelisted sender gets attributed correctly, not
+    /// treated as a distinct relationship with its own framing, yet.
+    /// </summary>
+    public List<AllowedContact> AllowedUsers { get; set; } = new();
     /// <summary>Soft budget: surfaced to the agent so reaching out is a visible choice, never blocked.</summary>
     public int SoftOutboundBudgetPerDay { get; set; } = 12;
     /// <summary>Operator asked to be told when a conversation is marked sensitive.</summary>
@@ -104,6 +115,23 @@ public sealed class ChannelConfig {
     /// ReplyTick's context reaches — see IndexDb.RecentConversation.
     /// </summary>
     public int ConversationGapMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// The display label for whoever userId actually is: the operator's own
+    /// name, or the name configured for them in AllowedUsers. Falls back to
+    /// OperatorName for an unrecognized id so callers never need to
+    /// null-check — in practice this is only ever called with an id that
+    /// already passed DiscordChannel's whitelist gate.
+    /// </summary>
+    public string DisplayNameFor(ulong userId) =>
+        userId == OperatorUserId
+            ? OperatorName
+            : AllowedUsers.FirstOrDefault(u => u.UserId == userId)?.Name ?? OperatorName;
+}
+
+public sealed class AllowedContact {
+    public ulong UserId { get; set; }
+    public string Name { get; set; } = "";
 }
 
 public sealed class GoalConfig {

@@ -26,15 +26,39 @@ public sealed class ReplyTick : ITick {
     private readonly PeopleStore _people;
     private readonly LlmConfig _cfg;
     private readonly ChannelConfig _channelCfg;
+    // Who to route the reply to — operator or a whitelisted sender (see
+    // Program.cs's ReplyFactory). Purely routing: history, logging, and the
+    // prompt below are still built as if talking to the operator, regardless
+    // of who this actually is.
+    private readonly ulong _replyToUserId;
 
-    public ReplyTick(LlamaClient llm, IndexDb db, ContextBuilder ctx, IOperatorChannel channel, PeopleStore people, LlmConfig cfg, ChannelConfig channelCfg)
+    public ReplyTick(LlamaClient llm, IndexDb db, ContextBuilder ctx, IOperatorChannel channel, PeopleStore people,
+                      LlmConfig cfg, ChannelConfig channelCfg, ulong replyToUserId)
     {
         _llm = llm; _db = db; _ctx = ctx; _channel = channel;
-        _people = people; _cfg = cfg; _channelCfg = channelCfg;
+        _people = people; _cfg = cfg; _channelCfg = channelCfg; _replyToUserId = replyToUserId;
     }
 
     public async Task<TickOutcome> RunAsync(CancellationToken ct) {
-        var pending = _db.PendingInbound(5);
+        var isOperator = _replyToUserId == _channelCfg.OperatorUserId;
+        // The Discord user id as a string — the scoping key for everything
+        // below, so two different people talking to it around the same time
+        // never see each other's messages woven into their own history.
+        // Doubles as the PeopleStore/file-path key for non-operator contacts
+        // — stable regardless of what displayName below resolves to right
+        // now, unlike the operator's own key (their existing name-keyed
+        // people/ directory predates any of this and isn't being migrated).
+        var contactId = _replyToUserId.ToString();
+        var peopleSlug = isOperator ? _channelCfg.OperatorName : contactId;
+        // What to actually call them, separate from peopleSlug on purpose:
+        // this can change over time (PeopleStore.SyncDiscordName,
+        // SetPreferredName below) without touching where their history
+        // lives. The operator's name is fixed by config, never auto-tracked.
+        var displayName = isOperator
+            ? _channelCfg.OperatorName
+            : _people.CurrentName(contactId, _channelCfg.DisplayNameFor(_replyToUserId));
+
+        var pending = _db.PendingInbound(contactId, 5);
         if (pending.Count == 0) return TickOutcome.Nothing("no messages waiting");
 
         var p = _ctx.BeginStable(Seeds.ReplySystem);
@@ -43,8 +67,8 @@ public sealed class ReplyTick : ITick {
         // is the actual back-and-forth, not just what's new, so a reply
         // several messages into a conversation isn't built as if it were the
         // opening line.
-        var conversation = _db.RecentConversation(_channelCfg.ConversationGapMinutes);
-        _ctx.AddConversation(p, conversation, 3000);
+        var conversation = _db.RecentConversation(contactId, _channelCfg.ConversationGapMinutes);
+        _ctx.AddConversation(p, conversation, displayName, 3000);
 
         var r = await _llm.CompleteJsonAsync<ReplyResult>(
             p.Build("""
@@ -53,7 +77,8 @@ public sealed class ReplyTick : ITick {
                   "reply": "<what you say back>",
                   "summary": "<one line for the log>",
                   "sensitive": true | false,
-                  "salience": 0.0-1.0
+                  "salience": 0.0-1.0,
+                  "they_want_to_be_called": "<name, only if they just asked you to call them something — otherwise null>"
                 }
 
                 Mark sensitive if this conversation touches something personal or
@@ -63,33 +88,44 @@ public sealed class ReplyTick : ITick {
             _cfg.Slots["reply"], _cfg.MaxTokensReply, ct);
 
         if (r?.Reply is null || string.IsNullOrWhiteSpace(r.Reply)) {
-            // Silence here is worse than the tick just failing: the operator
-            // watched the typing indicator run and then nothing arrived at
-            // all — indistinguishable from a hang. Say so, even without a
-            // real reply; this is exactly what the stuck channel is for.
-            await _channel.SayStuckAsync("couldn't get a reply together for that — try again?", ct);
+            // Silence here is worse than the tick just failing: whoever's
+            // waiting watched the typing indicator run and then nothing
+            // arrived at all — indistinguishable from a hang. Say so, even
+            // without a real reply. Routed to them directly (not
+            // SayStuckAsync, which is operator-only) — the operator
+            // shouldn't get a confusing "I'm stuck" about a conversation
+            // they weren't even part of.
+            await _channel.ReplyToAsync(_replyToUserId,
+                "I think I'm stuck: couldn't get a reply together for that — try again?", ct);
             return new TickOutcome { Summary = "couldn't form a reply", Salience = 0.3 };
         }
 
-        await _channel.SendAsync(r.Reply, ct);
-        _db.AddMessage("out", _channelCfg.OperatorName, r.Reply);
+        // Only for whitelisted others — see the class remarks on why the
+        // operator's naming stays config-fixed. Recorded before building the
+        // log entries below so a rename this same tick is reflected in them.
+        if (!isOperator && !string.IsNullOrWhiteSpace(r.TheyWantToBeCalled)) {
+            _people.SetPreferredName(contactId, r.TheyWantToBeCalled!);
+            displayName = r.TheyWantToBeCalled!.Trim();
+        }
+
+        await _channel.ReplyToAsync(_replyToUserId, r.Reply, ct);
+        _db.AddMessage("out", displayName, r.Reply, contactId);
 
         var now = DateTimeOffset.UtcNow;
-        var slug = _channelCfg.OperatorName;
         foreach (var (id, content) in pending) {
-            _people.AppendInteractionLog(slug, now, $"**him:** {content}", r.Sensitive);
+            _people.AppendInteractionLog(peopleSlug, now, $"**{displayName}:** {content}", r.Sensitive);
             _db.MarkMessageHandled(id, "(reply)");
         }
-        _people.AppendInteractionLog(slug, now, $"**me:** {r.Reply}", r.Sensitive);
+        _people.AppendInteractionLog(peopleSlug, now, $"**me:** {r.Reply}", r.Sensitive);
 
         // Operator asked to be told when a conversation is marked sensitive.
         if (r.Sensitive && _channelCfg.NotifyOperatorOnSensitive)
             await _channel.NotifySensitiveAsync(now, ct);
 
         return new TickOutcome {
-            Summary = r.Summary ?? "talked with him",
+            Summary = r.Summary ?? $"talked with {displayName}",
             Body = r.Reply,
-            Person = slug,
+            Person = displayName,
             Sensitive = r.Sensitive,
             Salience = Math.Clamp(r.Salience ?? 0.5, 0, 1),
         };
@@ -100,5 +136,6 @@ public sealed class ReplyTick : ITick {
         [JsonPropertyName("summary")] public string? Summary { get; set; }
         [JsonPropertyName("sensitive")] public bool Sensitive { get; set; }
         [JsonPropertyName("salience")] public double? Salience { get; set; }
+        [JsonPropertyName("they_want_to_be_called")] public string? TheyWantToBeCalled { get; set; }
     }
 }

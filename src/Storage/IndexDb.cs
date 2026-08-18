@@ -18,6 +18,8 @@ public sealed class IndexDb : IDisposable
         _db.Open();
         Exec("PRAGMA journal_mode=WAL;");
         CreateSchema();
+        EnsureColumn("messages", "contact_id", "TEXT");
+        Exec("CREATE INDEX IF NOT EXISTS idx_msg_contact ON messages(contact_id);");
     }
 
     private void CreateSchema() => Exec("""
@@ -47,7 +49,7 @@ public sealed class IndexDb : IDisposable
         CREATE TABLE IF NOT EXISTS messages (
           id INTEGER PRIMARY KEY, ts TEXT NOT NULL, direction TEXT NOT NULL,
           person TEXT NOT NULL, content TEXT NOT NULL, handled INT DEFAULT 0,
-          episode_path TEXT
+          episode_path TEXT, contact_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_msg_handled ON messages(handled);
 
@@ -63,6 +65,22 @@ public sealed class IndexDb : IDisposable
         );
         CREATE INDEX IF NOT EXISTS idx_chore_state ON chores(state);
         """);
+
+    /// <summary>
+    /// CREATE TABLE IF NOT EXISTS above is a no-op against a messages table
+    /// that already existed before contact_id did — this box has been
+    /// running since before per-sender conversation scoping, so the live
+    /// table needs a real migration, not just a schema-string edit. Runs
+    /// after CreateSchema so a fresh table already has the column and this
+    /// (and the index below) are no-ops; on an existing table, adds it.
+    /// </summary>
+    private void EnsureColumn(string table, string column, string sqlType)
+    {
+        try { Exec($"ALTER TABLE {table} ADD COLUMN {column} {sqlType};"); }
+        // SQLite has no ADD COLUMN IF NOT EXISTS — "duplicate column name" is
+        // the standard, stable error text for exactly this case.
+        catch (SqliteException ex) when (ex.Message.Contains("duplicate column name")) { }
+    }
 
     // ── writes ──────────────────────────────────────────────────────────
 
@@ -150,14 +168,22 @@ public sealed class IndexDb : IDisposable
         }
     }
 
-    public long AddMessage(string direction, string person, string content)
+    /// <summary>
+    /// contactId scopes conversation history (PendingInbound, RecentConversation)
+    /// to one sender — the Discord user id as a string, in or out doesn't
+    /// matter, it's "who this exchange is with" either way. person is
+    /// unrelated and unchanged by any of this — still the display label used
+    /// for logging (see ReplyTick), not a scoping key.
+    /// </summary>
+    public long AddMessage(string direction, string person, string content, string? contactId = null)
     {
         using var c = _db.CreateCommand();
-        c.CommandText = "INSERT INTO messages (ts, direction, person, content) VALUES ($ts,$d,$p,$c); SELECT last_insert_rowid();";
+        c.CommandText = "INSERT INTO messages (ts, direction, person, content, contact_id) VALUES ($ts,$d,$p,$c,$cid); SELECT last_insert_rowid();";
         c.Parameters.AddWithValue("$ts", DateTimeOffset.UtcNow.ToString("o"));
         c.Parameters.AddWithValue("$d", direction);
         c.Parameters.AddWithValue("$p", person);
         c.Parameters.AddWithValue("$c", content);
+        c.Parameters.AddWithValue("$cid", (object?)contactId ?? DBNull.Value);
         return (long)(c.ExecuteScalar() ?? 0L);
     }
 
@@ -233,11 +259,13 @@ public sealed class IndexDb : IDisposable
         return Convert.ToInt32(c.ExecuteScalar());
     }
 
-    public List<(long Id, string Content)> PendingInbound(int limit = 5)
+    /// <summary>contactId scopes this to one sender's unhandled messages — see AddMessage.</summary>
+    public List<(long Id, string Content)> PendingInbound(string contactId, int limit = 5)
     {
         var list = new List<(long, string)>();
         using var c = _db.CreateCommand();
-        c.CommandText = "SELECT id, content FROM messages WHERE handled=0 AND direction='in' ORDER BY ts LIMIT $l";
+        c.CommandText = "SELECT id, content FROM messages WHERE handled=0 AND direction='in' AND contact_id=$cid ORDER BY ts LIMIT $l";
+        c.Parameters.AddWithValue("$cid", contactId);
         c.Parameters.AddWithValue("$l", limit);
         using var r = c.ExecuteReader();
         while (r.Read()) list.Add((r.GetInt64(0), r.GetString(1)));
@@ -245,20 +273,24 @@ public sealed class IndexDb : IDisposable
     }
 
     /// <summary>
-    /// The messages that make up "the current conversation": scans back from
-    /// the most recent message (either direction, handled or not — a reply
-    /// tick marks its inputs handled immediately, so restricting to unhandled
-    /// would mean every reply after the first sees none of what came before
-    /// it) and stops at the first gap longer than gapMinutes. Everything
-    /// before that gap is a different conversation and is left out. Returned
-    /// oldest-first, ready to render as a transcript.
+    /// The messages that make up "the current conversation" with one contact
+    /// (see AddMessage): scans back from the most recent message with them
+    /// (either direction, handled or not — a reply tick marks its inputs
+    /// handled immediately, so restricting to unhandled would mean every
+    /// reply after the first sees none of what came before it) and stops at
+    /// the first gap longer than gapMinutes. Everything before that gap is a
+    /// different conversation and is left out. Returned oldest-first, ready
+    /// to render as a transcript. Scoped to contactId so two different
+    /// people talking to it around the same time never see each other's
+    /// messages woven into their own history.
     /// </summary>
-    public List<(string Direction, string Content, string Ts)> RecentConversation(int gapMinutes, int scanLimit = 40)
+    public List<(string Direction, string Content, string Ts)> RecentConversation(string contactId, int gapMinutes, int scanLimit = 40)
     {
         var rows = new List<(string Direction, string Content, string Ts)>();
         using (var c = _db.CreateCommand())
         {
-            c.CommandText = "SELECT direction, content, ts FROM messages ORDER BY ts DESC LIMIT $l";
+            c.CommandText = "SELECT direction, content, ts FROM messages WHERE contact_id=$cid ORDER BY ts DESC LIMIT $l";
+            c.Parameters.AddWithValue("$cid", contactId);
             c.Parameters.AddWithValue("$l", scanLimit);
             using var r = c.ExecuteReader();
             while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2)));

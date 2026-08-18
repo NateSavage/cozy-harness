@@ -25,6 +25,7 @@ public sealed class TickScheduler {
     private readonly IndexDb _db;
     private readonly TickRunner _runner;
     private readonly Func<TickType, ITick> _factory;
+    private readonly Func<ulong, ITick> _replyFactory;
     private readonly IOperatorChannel _channel;
     private readonly Random _rng = new();
 
@@ -38,10 +39,10 @@ public sealed class TickScheduler {
     private readonly ErrorReporter _errors;
 
     public TickScheduler(AgentClock clock, ScheduleConfig cfg, ChoreConfig choreCfg, IndexDb db,
-                          TickRunner runner, Func<TickType, ITick> factory, IOperatorChannel channel,
-                          AgentActivity activity, ErrorReporter errors) {
+                          TickRunner runner, Func<TickType, ITick> factory, Func<ulong, ITick> replyFactory,
+                          IOperatorChannel channel, AgentActivity activity, ErrorReporter errors) {
         _clock = clock; _cfg = cfg; _choreCfg = choreCfg; _db = db; _runner = runner; _factory = factory;
-        _channel = channel; _activity = activity; _errors = errors;
+        _replyFactory = replyFactory; _channel = channel; _activity = activity; _errors = errors;
     }
 
     public async Task RunAsync(CancellationToken ct) {
@@ -131,11 +132,16 @@ public sealed class TickScheduler {
         await RunHeavy(wake, ct);
     }
 
-    /// <summary>The fast path. Interrupts the pulse cycle so real conversation is possible.</summary>
-    public async Task HandleInboundAsync(CancellationToken ct) {
+    /// <summary>
+    /// The fast path. Interrupts the pulse cycle so real conversation is
+    /// possible. userId is whoever actually sent the message (operator or a
+    /// whitelisted sender) — purely so ReplyTick can route its answer back to
+    /// them; see Program.cs's ReplyFactory.
+    /// </summary>
+    public async Task HandleInboundAsync(ulong userId, CancellationToken ct) {
         // Deliberately does NOT take the heavy lock: a reply should never wait
         // behind a work tick, and it isn't a work tick itself.
-        await _runner.RunAsync(_factory(TickType.Reply), ct);
+        await _runner.RunAsync(_replyFactory(userId), ct);
     }
 
     private async Task RunHeavy(TickType type, CancellationToken ct) {

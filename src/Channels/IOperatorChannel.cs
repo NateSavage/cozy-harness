@@ -1,11 +1,31 @@
 namespace CozyHarness.Channels;
 
 public interface IOperatorChannel {
-    /// <summary>Raised when the operator says something. Drives the fast path.</summary>
-    event Func<string, Task>? MessageReceived;
+    /// <summary>
+    /// Raised when an allowed sender says something. Drives the fast path.
+    /// The id identifies who — the operator or someone on the whitelist —
+    /// purely so a reply can be routed back to the right person; see
+    /// ReplyToAsync. The name is whatever the channel currently displays for
+    /// them (e.g. Discord's own display name) — passive best-effort
+    /// tracking for PeopleStore.SyncDiscordName, not something they asked
+    /// for; see SetPreferredName for the difference.
+    /// </summary>
+    event Func<ulong, string, string, Task>? MessageReceived;
 
     Task StartAsync(CancellationToken ct);
+
+    /// <summary>Always to the operator specifically — proactive messages (WorkTick's message_operator, stuck/error/sensitive notices) are never meant for anyone else on the whitelist.</summary>
     Task SendAsync(string content, CancellationToken ct);
+
+    /// <summary>
+    /// A reply addressed to whoever actually sent the inbound message —
+    /// operator or a whitelisted third party. Routes to that sender's own DM
+    /// channel, not necessarily the operator's (see DiscordChannel's
+    /// per-sender channel cache). This is purely message routing: the
+    /// conversation history and prompt ReplyTick builds around this send are
+    /// still operator-framed regardless of who userId actually is.
+    /// </summary>
+    Task ReplyToAsync(ulong userId, string content, CancellationToken ct);
 
     /// <summary>
     /// The away/online half of presence, driven by the clock — separate from

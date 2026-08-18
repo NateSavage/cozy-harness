@@ -64,7 +64,8 @@ AgentActivity activity = new();
 
 IOperatorChannel channel = string.IsNullOrEmpty(cfg.Channel.DiscordToken)
     ? new ConsoleChannel(activity)
-    : new DiscordChannel(cfg.Channel.DiscordToken!, cfg.Channel.OperatorUserId, activity);
+    : new DiscordChannel(cfg.Channel.DiscordToken!, cfg.Channel.OperatorUserId,
+                          cfg.Channel.AllowedUsers.Select(u => u.UserId), activity);
 
 var feeds = new List<IFeed> { new WatchedDirectoryFeed(cfg.Feeds.WatchedDirectory) };
 if (!string.IsNullOrEmpty(cfg.Feeds.GitHubUser))
@@ -79,20 +80,37 @@ ITick TickFactory(TickType tickType) => tickType switch {
     TickType.Intake        => new IntakeTick(mainLlm, db, context, goals, feeds, cfg.Llm),
     TickType.ReflectDaily  => new ReflectTick(false, mainLlm, db, context, goals, tree, cfg.Llm),
     TickType.ReflectWeekly => new ReflectTick(true, mainLlm, db, context, goals, tree, cfg.Llm),
-    TickType.Reply         => new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel),
     TickType.Chore         => new ChoreTick(mainLlm, db, context, chores, cfg.Llm, activity),
     _ => throw new ArgumentOutOfRangeException(nameof(tickType)),
 };
 
+// Reply gets its own factory, not a case in TickFactory above: it's the only
+// tick that needs to know who to answer — the sender, whitelisted or the
+// operator, routed back to their own DM channel (see DiscordChannel.ReplyToAsync).
+// Everything else about the reply (history, logging, the prompt itself)
+// still treats the conversation as the operator's, per AllowedUserIds' scope.
+ITick ReplyFactory(ulong replyToUserId) =>
+    new ReplyTick(mainLlm, db, context, channel, people, cfg.Llm, cfg.Channel, replyToUserId);
+
 AgentClock clock = new(cfg.Schedule, cfg.OperatorTimeZone);
-TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, db, runner, TickFactory, channel, activity, errors);
+TickScheduler scheduler = new(clock, cfg.Schedule, cfg.Chores, db, runner, TickFactory, ReplyFactory, channel, activity, errors);
 
 using CancellationTokenSource cts = new();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-channel.MessageReceived += async content => {
-    db.AddMessage("in", cfg.Channel.OperatorName, content);
-    await scheduler.HandleInboundAsync(cts.Token);
+// The operator's name is fixed by config, never auto-tracked — see
+// PeopleStore's class remarks on why whitelisted others are handled
+// differently (they have no pre-existing history to disturb; the operator
+// does). ReplyTick resolves the same way for its own logging.
+string ResolveContactName(ulong userId, string discordDisplayName) {
+    if (userId == cfg.Channel.OperatorUserId) return cfg.Channel.OperatorName;
+    people.SyncDiscordName(userId.ToString(), discordDisplayName);
+    return people.CurrentName(userId.ToString(), cfg.Channel.DisplayNameFor(userId));
+}
+
+channel.MessageReceived += async (userId, discordName, content) => {
+    db.AddMessage("in", ResolveContactName(userId, discordName), content, userId.ToString());
+    await scheduler.HandleInboundAsync(userId, cts.Token);
 };
 await channel.StartAsync(cts.Token);
 

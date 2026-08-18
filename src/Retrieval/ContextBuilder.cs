@@ -66,14 +66,14 @@ public sealed class ContextBuilder {
     /// IndexDb.RecentConversation for how the conversation boundary itself
     /// (as opposed to what's rendered once you have it) gets decided.
     /// </summary>
-    public void AddConversation(PromptParts p, IEnumerable<(string Direction, string Content, string Ts)> messages, int budget) {
+    public void AddConversation(PromptParts p, IEnumerable<(string Direction, string Content, string Ts)> messages, string contactName, int budget) {
         var list = messages.ToList();
         if (list.Count == 0) return;
 
         var s = new StringBuilder("## Our conversation\n\n");
         foreach (var (direction, content, ts) in list) {
             var when = DateTimeOffset.TryParse(ts, out var d) ? Ago(d) : ts;
-            var speaker = direction == "out" ? "me" : "him";
+            var speaker = direction == "out" ? "me" : contactName;
             s.Append($"**{speaker}** ({when}): {content.Trim()}\n\n");
         }
         p.AddVariable(s.ToString(), budget);

@@ -7,10 +7,20 @@ using Discord.WebSocket;
 namespace CozyHarness.Channels;
 
 /// <summary>
-/// Discord.Net gateway client. One operator, reached over DM — not a
-/// configured channel. Guild chat is deliberately out of scope for now: guild
-/// messages are ignored entirely (see OnGatewayMessageAsync), and the whole
-/// class assumes a single, stable DM channel with one specific user.
+/// Discord.Net gateway client. The operator plus an optional whitelist of
+/// additional Discord user IDs (AgentConfig.ChannelConfig.AllowedUserIds),
+/// all reached over DM — not a configured channel. Guild chat is deliberately
+/// out of scope for now: guild messages are ignored entirely (see
+/// OnGatewayMessageAsync).
+///
+/// The whitelist is a gate and a routing table, nothing more: a message from
+/// an allowed non-operator sender is queued and replied to like any other,
+/// routed back to THEIR OWN DM channel (see GetOrResolveDmChannelAsync /
+/// ReplyToAsync) rather than the operator's — but conversation history,
+/// message logging, and the reply prompt itself are all still built as if
+/// talking to the operator specifically. Control-plane affordances
+/// (interrupt buttons, and SendAsync's proactive sends — WorkTick's
+/// message_operator, stuck/error/sensitive notices) stay operator-only.
 ///
 /// Because DMs are exempt from the Message Content privileged intent (a bot
 /// always sees the content of DMs it's a party to, regardless), this needs no
@@ -19,7 +29,7 @@ namespace CozyHarness.Channels;
 /// Two rules preserved from the original contract:
 ///   - Inbound interrupts the pulse cycle so real conversation is possible: an
 ///     accepted message is always handed to MessageReceived, with no filtering
-///     or batching beyond "is this actually the operator talking."
+///     or batching beyond "is this the operator or someone on the whitelist."
 ///   - Outbound is never blocked. The daily budget is shown to the agent, not
 ///     enforced against it here.
 ///
@@ -63,22 +73,29 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
     private readonly string _token;
     private readonly ulong _operatorUserId;
+    private readonly HashSet<ulong> _allowedUserIds;
     private readonly AgentActivity _activity;
     private readonly DiscordSocketClient _client;
     private readonly Channel<(SocketMessage Msg, string Text)> _inbox =
         Channel.CreateUnbounded<(SocketMessage Msg, string Text)>();
 
-    private IDMChannel? _dmChannel;   // resolved once in StartAsync; every send/read after that reuses it
-    private ulong? _lastInboundMessageId;
+    private IDMChannel? _dmChannel;   // the operator's — resolved once in StartAsync; every operator send/read after that reuses it
+    // Whitelisted non-operator senders' DM channels, resolved lazily on first
+    // contact rather than all up front — most configured entries may never
+    // actually message it.
+    private readonly Dictionary<ulong, IDMChannel> _otherDmChannels = new();
+    // Per sender, so a reply to one whitelisted person can't thread onto a
+    // different person's (or the operator's) most recent message.
+    private readonly Dictionary<ulong, ulong> _lastInboundMessageId = new();
     private Task? _inboxWorker;
     // Read by SyncStatusAsync (whenever it recomputes, including after a
     // reconnect), written by SetAwayAsync — a gateway drop-and-resume during
     // quiet hours must not silently flip the bot back to looking awake.
     private volatile bool _away;
 
-    public event Func<string, Task>? MessageReceived;
+    public event Func<ulong, string, string, Task>? MessageReceived;
 
-    public DiscordChannel(string token, ulong operatorUserId, AgentActivity activity)
+    public DiscordChannel(string token, ulong operatorUserId, IEnumerable<ulong> allowedUserIds, AgentActivity activity)
     {
         // A real Discord snowflake is never 0 — this is the default `ulong`
         // when OperatorUserId is left unset in config. Left unchecked, the bot
@@ -91,6 +108,7 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
         _token = token;
         _operatorUserId = operatorUserId;
+        _allowedUserIds = new HashSet<ulong>(allowedUserIds);
         _activity = activity;
 
         _client = new DiscordSocketClient(new DiscordSocketConfig
@@ -193,7 +211,10 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     private Task OnGatewayMessageAsync(SocketMessage msg)
     {
         if (msg.Channel is not IDMChannel) return Task.CompletedTask;   // guild chat is out of scope for now
-        if (msg.Author.Id != _operatorUserId) return Task.CompletedTask;   // only the configured operator — never a stranger's DM
+        // Anyone not the operator and not on the whitelist is ignored outright
+        // here — never queued, never logged, never wakes the agent.
+        if (msg.Author.Id != _operatorUserId && !_allowedUserIds.Contains(msg.Author.Id))
+            return Task.CompletedTask;
 
         var text = ExtractText(msg);
         if (text is null) return Task.CompletedTask;
@@ -237,24 +258,31 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
         {
             await foreach (var (msg, text) in _inbox.Reader.ReadAllAsync(ct))
             {
-                _lastInboundMessageId = msg.Id;
+                _lastInboundMessageId[msg.Author.Id] = msg.Id;
                 var handler = MessageReceived;
                 if (handler is null) continue;
 
                 IDisposable? typing = null;
                 try
                 {
-                    // A reply always comes either way — this is a heads-up,
-                    // not a gate, and never blocks the reply from starting.
-                    if (_activity.CurrentTick is not null)
+                    // Interrupt/Let-it-finish is a control-plane action — kept
+                    // operator-only, same as OnButtonExecutedAsync's own check.
+                    // A whitelisted sender still gets typing + activity text,
+                    // just not a notice whose buttons would silently do
+                    // nothing for them.
+                    if (_activity.CurrentTick is not null && msg.Author.Id == _operatorUserId)
                         await SendBusyNoticeAsync(msg.Id);
 
-                    typing = _dmChannel!.EnterTypingState();
+                    var channel = await GetOrResolveDmChannelAsync(msg.Author.Id);
+                    typing = channel.EnterTypingState();
                     await _client.SetGameAsync("a reply taking shape", type: ActivityType.Watching);
                 }
                 catch { /* best-effort; a presence hiccup shouldn't block the actual reply */ }
 
-                try { await handler(text); }
+                // GlobalName is Discord's newer "display name" concept, distinct
+                // from the permanent @username — falls back to Username when
+                // unset (older accounts, or just never set one).
+                try { await handler(msg.Author.Id, msg.Author.GlobalName ?? msg.Author.Username, text); }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"[discord] inbound handler failed: {ex}");
@@ -275,10 +303,33 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
     }
 
     /// <summary>
+    /// The operator's own channel if this is them (resolved once in
+    /// StartAsync), otherwise a whitelisted sender's channel — resolved on
+    /// first contact and cached from then on, rather than every allowed ID
+    /// getting resolved eagerly at startup for people who may never actually
+    /// message it.
+    /// </summary>
+    private async Task<IDMChannel> GetOrResolveDmChannelAsync(ulong userId)
+    {
+        if (userId == _operatorUserId)
+            return _dmChannel ?? throw new InvalidOperationException(
+                "DiscordChannel.StartAsync hasn't completed yet — no DM channel resolved.");
+
+        if (_otherDmChannels.TryGetValue(userId, out var cached)) return cached;
+
+        var user = await _client.Rest.GetUserAsync(userId)
+            ?? throw new InvalidOperationException($"Discord user {userId} not found — check the whitelist is correct.");
+        var channel = await user.CreateDMChannelAsync();
+        _otherDmChannels[userId] = channel;
+        return channel;
+    }
+
+    /// <summary>
     /// "Here's what I'm doing, interrupt or let it finish?" — sent once per
     /// inbound message that arrives while a heavy tick is running. Threaded to
     /// that specific message rather than going through SendAsync, since it's
     /// tied to one arrival, not a general thing the agent wants to say.
+    /// Operator-only — see the call site.
     /// </summary>
     private async Task SendBusyNoticeAsync(ulong replyToId)
     {
@@ -385,23 +436,39 @@ public sealed class DiscordChannel : IOperatorChannel, IAsyncDisposable {
 
     public async Task SendAsync(string content, CancellationToken ct)
     {
-        if (_dmChannel is null)
-            throw new InvalidOperationException("DiscordChannel.StartAsync hasn't completed yet — no DM channel resolved.");
+        var channel = await GetOrResolveDmChannelAsync(_operatorUserId);
+        await SendToChannelAsync(channel, _operatorUserId, content, ct);
+    }
 
+    /// <summary>
+    /// A reply addressed to whoever actually sent the inbound message — the
+    /// operator, or a whitelisted sender routed to their own DM channel. See
+    /// class remarks: everything ReplyTick builds around this send is still
+    /// operator-framed regardless of who userId is; this only controls where
+    /// the words end up.
+    /// </summary>
+    public async Task ReplyToAsync(ulong userId, string content, CancellationToken ct)
+    {
+        var channel = await GetOrResolveDmChannelAsync(userId);
+        await SendToChannelAsync(channel, userId, content, ct);
+    }
+
+    private async Task SendToChannelAsync(IDMChannel channel, ulong recipientId, string content, CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(content)) return;   // Discord rejects an empty message body outright
 
-        // The first chunk threads to whatever the operator most recently said,
-        // then the reference is consumed — a later, unprompted send (WorkTick's
-        // message_operator, SayStuckAsync) shouldn't look like a reply to an old
-        // conversation just because nothing newer came in.
-        var reference = _lastInboundMessageId is { } id ? new MessageReference(id) : null;
-        _lastInboundMessageId = null;
+        // The first chunk threads to whatever this recipient most recently
+        // sent, then the reference is consumed — a later, unprompted send
+        // (WorkTick's message_operator, SayStuckAsync) shouldn't look like a
+        // reply to an old conversation just because nothing newer came in.
+        var reference = _lastInboundMessageId.TryGetValue(recipientId, out var id) ? new MessageReference(id) : null;
+        _lastInboundMessageId.Remove(recipientId);
 
         var first = true;
         foreach (var chunk in Chunk(content))
         {
             ct.ThrowIfCancellationRequested();
-            await _dmChannel.SendMessageAsync(chunk,
+            await channel.SendMessageAsync(chunk,
                 allowedMentions: NoMentions,
                 messageReference: first ? reference : null);
             first = false;
